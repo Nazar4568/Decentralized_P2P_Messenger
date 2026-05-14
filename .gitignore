@@ -1,0 +1,13 @@
+# --- Mac / Linux / CLion ---
+cmake-build-*/
+build/
+.idea/
+*.user
+.DS_Store
+
+# --- Windows / Visual Studio ---
+.vs/
+out/
+*.exe
+*.dll
+*.obj
