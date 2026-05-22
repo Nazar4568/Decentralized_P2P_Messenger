@@ -1,38 +1,45 @@
 #pragma once
+
+#include "IP2PNode.h"
+
+#include <atomic>
+#include <memory>
+#include <mutex>
 #include <string>
-#include <functional>
-#include <cstdint>
-#include <opendht.h>
+#include <thread>
 
-struct UserProfile;
-struct EncryptedPacket;
+class wxEvtHandler;
 
-class IP2PNode {
-public:
-    virtual ~IP2PNode() = default;
-
-    virtual bool start(uint16_t port) = 0;
-    virtual void stop() = 0;
-    virtual void publishProfile(const UserProfile& profile) = 0;
-    virtual void findPeer(const std::string& userId) = 0;
-    virtual void sendPacket(const std::string& receiverId, const EncryptedPacket& packet) = 0;
-
-    virtual void setMessageCallback(std::function<void(EncryptedPacket)> callback) = 0;
-};
-
+/**
+ * Concrete P2P node — Sprint 1 mock implementation.
+ * OpenDHT integration is deferred to Sprint 2; this class simulates async I/O.
+ */
 class P2PNode : public IP2PNode {
 public:
     P2PNode();
     ~P2PNode() override;
 
-    bool start(uint16_t port) override;
-    void stop() override;
-    void publishProfile(const UserProfile& profile) override;
-    void findPeer(const std::string& userId) override;
-    void sendPacket(const std::string& receiverId, const EncryptedPacket& packet) override;
-    void setMessageCallback(std::function<void(EncryptedPacket)> callback) override;
+    void sendMessage(const std::string& toPeerId, const std::string& text) override;
+    void startNode() override;
+    void stopNode() override;
+
+    void bindUiTarget(wxEvtHandler* target) override;
+    void setMessageReceivedHandler(MessageReceivedHandler handler) override;
+    void setPeerFoundHandler(PeerFoundHandler handler) override;
 
 private:
-    std::function<void(EncryptedPacket)> m_messageCallback;
-    dht::DhtRunner m_dht;
+    void mockWorkerLoop();
+    void notifyMessageReceived(const std::string& fromPeerId, const std::string& text);
+    void notifyPeerFound(const std::string& peerId);
+    void queueMessageEventToUi(const std::string& fromPeerId, const std::string& text);
+    void queuePeerFoundEventToUi(const std::string& peerId);
+
+    wxEvtHandler* m_uiTarget{nullptr};
+
+    MessageReceivedHandler m_messageHandler;
+    PeerFoundHandler m_peerFoundHandler;
+    std::mutex m_handlerMutex;
+
+    std::atomic<bool> m_running{false};
+    std::unique_ptr<std::thread> m_mockThread;
 };
