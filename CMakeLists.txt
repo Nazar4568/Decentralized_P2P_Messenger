@@ -12,7 +12,7 @@ add_executable(Decentralized_P2P_Messenger
     src/main.cpp
     src/MainWindow.cpp
     src/P2PNode.cpp
-    src/crypto/CryptoService.cpp
+    src/CryptoService.cpp
     include/IP2PNode.h
     include/P2PNode.h
     include/P2PWxEvents.h
@@ -33,12 +33,13 @@ target_link_libraries(Decentralized_P2P_Messenger PRIVATE
 
 # OpenDHT — optional platform-specific link for Sprint 2+ (not required for Sprint 1 mock)
 if(APPLE)
+
     find_package(PkgConfig REQUIRED)
     pkg_check_modules(OPENDHT opendht)
 
     if(OPENDHT_FOUND)
-        target_include_directories(Decentralized_P2P_Messenger PRIVATE ${OPENDHT_INCLUDE_DIRS})
-        target_link_directories(Decentralized_P2P_Messenger PRIVATE ${OPENDHT_LIBRARY_DIRS})
+        target_include_directories(Decentralized_P2P_Messenger PRIVATE ${OPENDHT_INCLUDE_DIRS} "/opt/homebrew/include")
+        target_link_directories(Decentralized_P2P_Messenger PRIVATE ${OPENDHT_LIBRARY_DIRS} "/opt/homebrew/lib")
         target_link_libraries(Decentralized_P2P_Messenger PRIVATE ${OPENDHT_LIBRARIES})
         target_compile_definitions(Decentralized_P2P_Messenger PRIVATE HAS_OPENDHT=1)
     endif()
