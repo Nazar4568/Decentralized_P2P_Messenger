@@ -56,7 +56,7 @@ void P2PNode::startNode()
                 std::string text = payload.substr(delimiter + 1);
 
                 if (senderId != m_myId) {
-                    std::cout << "\n[DHT] Входящее от " << senderId << ": " << text << "\n";
+                    std::cout << "\n[DHT] Incoming message from " << senderId << ": " << text << "\n";
                     this->notifyMessageReceived(senderId, text);
                 }
             }
