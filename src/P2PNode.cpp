@@ -1,6 +1,7 @@
 #include "../include/P2PNode.h"
 #include "../include/P2PWxEvents.h"
 
+#include "../include/Types.h"
 #include <chrono>
 #include <iostream>
 #include <wx/event.h>
@@ -303,4 +304,59 @@ void P2PNode::queueNetworkStatusEventToUi(const std::string& status)
     auto* event = new wxThreadEvent(wxEVT_P2P_NETWORK_STATUS);
     event->SetString(wxString::FromUTF8(status.c_str(), static_cast<int>(status.size())));
     wxQueueEvent(m_uiTarget, event);
+}
+
+void P2PNode::bootstrap(const std::string& ip, const std::string& port)
+{
+    std::cout << "[P2PNode] Connecting to " << ip << ":" << port << "...\n";
+    m_dht.bootstrap(ip, port);
+}
+void P2PNode::publishProfile(const UserProfile& profile)
+{
+
+    dht::InfoHash key = dht::InfoHash::get(profile.userId);
+
+    std::string payload = profile.displayName + "|" + profile.tcpEndpoint;
+
+    std::cout << "[P2PNode] Publishing a profile by key: " << profile.userId << "...\n";
+
+
+    m_dht.put(key, payload, [](bool success) {
+        if (success) {
+            std::cout << "[DHT] Success! The profile has been replicated across the network..\n";
+        } else {
+            std::cerr << "[DHT] Error: Failed to publish profile.\n";
+        }
+    });
+}
+
+void P2PNode::findPeer(const std::string& userId) {
+    dht::InfoHash key = dht::InfoHash::get(userId);
+    std::cout << "[P2PNode] Searching for peer: " << userId << "...\n";
+
+    dht::GetCallback callback = [this, userId](const std::vector<std::shared_ptr<dht::Value>>& values) {
+        for (const auto& value : values) {
+            std::string payload(value->data.begin(), value->data.end());
+            std::cout << "[DHT] Peer found (" << userId << "): " << payload << "\n";
+            this->notifyPeerFound(userId);
+        }
+        return true;
+    };
+    m_dht.get(key, callback);
+}
+void P2PNode::sendPacket(const std::string& receiverId, const EncryptedPacket& packet)
+{
+    dht::InfoHash key = dht::InfoHash::get(receiverId + "_inbox");
+
+    std::string payload = packet.senderId + ":" + packet.ciphertext;
+
+    std::cout << "[P2PNode] Sending packet to " << receiverId << "...\n";
+
+    m_dht.put(key, payload, [](bool success) {
+        if (success) {
+            std::cout << "[DHT] Packet delivered to DHT network.\n";
+        } else {
+            std::cerr << "[DHT] Error: Failed to deliver packet.\n";
+        }
+    });
 }

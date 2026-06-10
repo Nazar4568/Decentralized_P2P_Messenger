@@ -12,19 +12,25 @@ add_executable(Decentralized_P2P_Messenger
     src/MainWindow.cpp
     src/AppController.cpp
     src/P2PNode.cpp
+    src/CryptoService.cpp
     include/IP2PNode.h
     include/AppController.h
     include/P2PNode.h
     include/P2PWxEvents.h
     include/MainWindow.h
     include/Types.h
+    include/CryptoService.h
 )
 
 target_include_directories(Decentralized_P2P_Messenger PRIVATE
     ${CMAKE_CURRENT_SOURCE_DIR}/include
+    /opt/homebrew/opt/libsodium/include
 )
 
-target_link_libraries(Decentralized_P2P_Messenger PRIVATE ${wxWidgets_LIBRARIES})
+target_link_libraries(Decentralized_P2P_Messenger PRIVATE 
+    ${wxWidgets_LIBRARIES}
+    /opt/homebrew/opt/libsodium/lib/libsodium.dylib
+)
 
 # OpenDHT — real P2P networking for Sprint 2
 set(HAS_OPENDHT OFF)

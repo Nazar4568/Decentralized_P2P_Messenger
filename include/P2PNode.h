@@ -13,7 +13,7 @@
 #include <mutex>
 #include <string>
 #include <thread>
-
+#include "../include/Types.h"
 class wxEvtHandler;
 
 /**
