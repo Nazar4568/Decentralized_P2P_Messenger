@@ -3,11 +3,10 @@
 #include <wx/event.h>
 #include <wx/wx.h>
 
-// Custom event type IDs (must be unique within the application).
 wxDECLARE_EVENT(wxEVT_P2P_MESSAGE_RECEIVED, wxThreadEvent);
 wxDECLARE_EVENT(wxEVT_P2P_PEER_FOUND, wxThreadEvent);
+wxDECLARE_EVENT(wxEVT_P2P_NETWORK_STATUS, wxThreadEvent);
 
-/// Parse payload queued by P2PNode::queueMessageEventToUi (format: "fromPeerId|text").
 inline void ParseMessageReceivedEvent(const wxThreadEvent& event,
                                       wxString& outFromPeerId,
                                       wxString& outText)
