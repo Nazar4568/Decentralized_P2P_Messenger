@@ -13,7 +13,7 @@ struct IncomingMessage {
     std::string text;
 };
 
-/// Payload when a peer is discovered on the DHT (mock in Sprint 1).
+/// Payload when a peer is discovered on the DHT.
 struct PeerFoundNotification {
     std::string peerId;
 };

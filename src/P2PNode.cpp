@@ -5,15 +5,21 @@
 #include <iostream>
 #include <wx/event.h>
 
-// Define custom wx event types (one translation unit).
 wxDEFINE_EVENT(wxEVT_P2P_MESSAGE_RECEIVED, wxThreadEvent);
 wxDEFINE_EVENT(wxEVT_P2P_PEER_FOUND, wxThreadEvent);
+wxDEFINE_EVENT(wxEVT_P2P_NETWORK_STATUS, wxThreadEvent);
 
 P2PNode::P2PNode() = default;
 
 P2PNode::~P2PNode()
 {
     stopNode();
+}
+
+void P2PNode::setNodeConfig(uint16_t port, const std::string& id)
+{
+    m_port = port;
+    m_myId = id;
 }
 
 void P2PNode::bindUiTarget(wxEvtHandler* target)
@@ -35,50 +41,192 @@ void P2PNode::setPeerFoundHandler(PeerFoundHandler handler)
 
 void P2PNode::startNode()
 {
-    if (m_running.exchange(true)) {
+    if (m_running) {
         return;
     }
 
-    std::cout << "[P2PNode] Mock node started (Sprint 1).\n";
+#ifdef HAS_OPENDHT
+    const auto id = dht::crypto::generateIdentity();
+    m_dht.run(m_port, id, true);
+    m_running = true;
 
+    notifyNetworkStatus("Running on port " + std::to_string(m_port) + " as " + m_myId);
+
+    const dht::InfoHash listenKey = dht::InfoHash::get(m_myId + "_inbox");
+    std::cout << "[P2PNode] Listening on inbox key: " << m_myId << "_inbox\n";
+
+    dht::ValueCallback listenCallback =
+        [this](const std::vector<std::shared_ptr<dht::Value>>& values, bool expired) {
+            if (expired) {
+                return true;
+            }
+            for (const auto& value : values) {
+                const std::string payload(value->data.begin(), value->data.end());
+                const size_t delimiter = payload.find(':');
+                if (delimiter == std::string::npos) {
+                    continue;
+                }
+
+                const std::string senderId = payload.substr(0, delimiter);
+                const std::string text = payload.substr(delimiter + 1);
+
+                if (senderId.empty() || senderId == m_myId) {
+                    continue;
+                }
+
+                std::cout << "[DHT] Incoming message from " << senderId << ": " << text << '\n';
+                notifyMessageReceived(senderId, text);
+            }
+            return true;
+        };
+
+    m_dht.listen(listenKey, std::move(listenCallback));
+    notifyNetworkStatus("Listening for messages on " + m_myId + "_inbox");
+#else
+    m_running = true;
+    std::cout << "[P2PNode] Mock node started (install libopendht-dev for real DHT).\n";
+    notifyNetworkStatus("Mock mode — install libopendht-dev for real networking");
     m_mockThread = std::make_unique<std::thread>([this]() { mockWorkerLoop(); });
-
-    // Simulate an early peer discovery event shortly after startup.
     notifyPeerFound("mock-peer-alice");
+#endif
 }
 
 void P2PNode::stopNode()
 {
-    if (!m_running.exchange(false)) {
+    if (!m_running) {
         return;
     }
 
+#ifdef HAS_OPENDHT
+    m_dht.join();
+#else
     if (m_mockThread && m_mockThread->joinable()) {
         m_mockThread->join();
     }
     m_mockThread.reset();
+#endif
 
-    std::cout << "[P2PNode] Mock node stopped.\n";
+    m_running = false;
+    notifyNetworkStatus("Node stopped");
+    std::cout << "[P2PNode] Node stopped.\n";
 }
 
 void P2PNode::sendMessage(const std::string& toPeerId, const std::string& text)
 {
+#ifdef HAS_OPENDHT
+    EncryptedPacket packet;
+    packet.senderId = m_myId;
+    packet.receiverId = toPeerId;
+    packet.ciphertext = text;
+    sendPacket(toPeerId, packet);
+#else
     std::cout << "[P2PNode] Mock send to '" << toPeerId << "': " << text << '\n';
+    notifyNetworkStatus("Mock send to " + toPeerId);
 
-    // Simulate network latency, then an "incoming" echo from the peer on a worker thread.
     std::thread([this, toPeerId, text]() {
         std::this_thread::sleep_for(std::chrono::milliseconds(400));
-        const std::string reply = "[echo] " + text;
-        notifyMessageReceived(toPeerId, reply);
+        notifyMessageReceived(toPeerId, "[echo] " + text);
     }).detach();
+#endif
 }
 
+void P2PNode::bootstrap(const std::string& ip, const std::string& port)
+{
+#ifdef HAS_OPENDHT
+    std::cout << "[P2PNode] Bootstrapping to " << ip << ':' << port << "...\n";
+    notifyNetworkStatus("Bootstrapping to " + ip + ":" + port);
+    m_dht.bootstrap(ip, port);
+#else
+    std::cout << "[P2PNode] Mock bootstrap to " << ip << ':' << port << '\n';
+    notifyNetworkStatus("Mock bootstrap to " + ip + ":" + port);
+#endif
+}
+
+void P2PNode::publishProfile(const UserProfile& profile)
+{
+#ifdef HAS_OPENDHT
+    const dht::InfoHash key = dht::InfoHash::get(profile.userId);
+    const std::string payload = profile.displayName + "|" + profile.tcpEndpoint;
+
+    std::cout << "[P2PNode] Publishing profile for " << profile.userId << "...\n";
+    notifyNetworkStatus("Publishing profile for " + profile.userId);
+
+    m_dht.put(key, payload, [this](bool success) {
+        if (success) {
+            std::cout << "[DHT] Profile published.\n";
+            notifyNetworkStatus("Profile published to DHT");
+        } else {
+            std::cerr << "[DHT] Failed to publish profile.\n";
+            notifyNetworkStatus("Failed to publish profile");
+        }
+    });
+#else
+    std::cout << "[P2PNode] Mock publish profile for " << profile.userId << '\n';
+    notifyNetworkStatus("Mock profile published for " + profile.userId);
+#endif
+}
+
+void P2PNode::findPeer(const std::string& userId)
+{
+#ifdef HAS_OPENDHT
+    const dht::InfoHash key = dht::InfoHash::get(userId);
+    std::cout << "[P2PNode] Searching for peer: " << userId << "...\n";
+    notifyNetworkStatus("Searching DHT for " + userId);
+
+    dht::GetCallback callback =
+        [this, userId](const std::vector<std::shared_ptr<dht::Value>>& values) {
+            if (values.empty()) {
+                notifyNetworkStatus("Peer not found on DHT: " + userId);
+                return true;
+            }
+
+            for (const auto& value : values) {
+                const std::string payload(value->data.begin(), value->data.end());
+                std::cout << "[DHT] Peer found (" << userId << "): " << payload << '\n';
+                notifyPeerFound(userId);
+            }
+            notifyNetworkStatus("Peer found: " + userId);
+            return true;
+        };
+
+    m_dht.get(key, std::move(callback));
+#else
+    std::cout << "[P2PNode] Mock find peer: " << userId << '\n';
+    notifyNetworkStatus("Mock lookup for " + userId);
+    notifyPeerFound(userId);
+#endif
+}
+
+void P2PNode::sendPacket(const std::string& receiverId, const EncryptedPacket& packet)
+{
+#ifdef HAS_OPENDHT
+    const dht::InfoHash key = dht::InfoHash::get(receiverId + "_inbox");
+    const std::string payload = packet.senderId + ":" + packet.ciphertext;
+
+    std::cout << "[P2PNode] Sending to " << receiverId << "...\n";
+    notifyNetworkStatus("Sending message to " + receiverId);
+
+    m_dht.put(key, payload, [this, receiverId](bool success) {
+        if (success) {
+            std::cout << "[DHT] Message delivered to DHT.\n";
+            notifyNetworkStatus("Message delivered to " + receiverId);
+        } else {
+            std::cerr << "[DHT] Failed to deliver message.\n";
+            notifyNetworkStatus("Failed to deliver message to " + receiverId);
+        }
+    });
+#else
+    sendMessage(receiverId, packet.ciphertext);
+#endif
+}
+
+#ifndef HAS_OPENDHT
 void P2PNode::mockWorkerLoop()
 {
     int tick = 0;
-    while (m_running.load()) {
-        std::this_thread::sleep_for(std::chrono::seconds(5));
-        if (!m_running.load()) {
+    while (m_running) {
+        std::this_thread::sleep_for(std::chrono::seconds(8));
+        if (!m_running) {
             break;
         }
         ++tick;
@@ -86,6 +234,7 @@ void P2PNode::mockWorkerLoop()
                               "Periodic mock message #" + std::to_string(tick));
     }
 }
+#endif
 
 void P2PNode::notifyMessageReceived(const std::string& fromPeerId, const std::string& text)
 {
@@ -98,7 +247,6 @@ void P2PNode::notifyMessageReceived(const std::string& fromPeerId, const std::st
         handler(IncomingMessage{fromPeerId, text});
     }
 
-    // Thread-safe path to wxWidgets: never touch UI here — only queue an event.
     queueMessageEventToUi(fromPeerId, text);
 }
 
@@ -116,17 +264,20 @@ void P2PNode::notifyPeerFound(const std::string& peerId)
     queuePeerFoundEventToUi(peerId);
 }
 
+void P2PNode::notifyNetworkStatus(const std::string& status)
+{
+    queueNetworkStatusEventToUi(status);
+}
+
 void P2PNode::queueMessageEventToUi(const std::string& fromPeerId, const std::string& text)
 {
     if (!m_uiTarget) {
         return;
     }
 
-    const wxString fromWx = wxString::FromUTF8(fromPeerId.c_str(), fromPeerId.size());
-    const wxString textWx = wxString::FromUTF8(text.c_str(), text.size());
+    const wxString fromWx = wxString::FromUTF8(fromPeerId.c_str(), static_cast<int>(fromPeerId.size()));
+    const wxString textWx = wxString::FromUTF8(text.c_str(), static_cast<int>(text.size()));
 
-    // wxQueueEvent takes ownership of a heap-allocated event. The GUI thread will
-    // process it inside MainWindow::OnP2PMessageReceived (via Bind).
     auto* event = new wxThreadEvent(wxEVT_P2P_MESSAGE_RECEIVED);
     event->SetString(fromWx + wxT("|") + textWx);
     wxQueueEvent(m_uiTarget, event);
@@ -139,6 +290,17 @@ void P2PNode::queuePeerFoundEventToUi(const std::string& peerId)
     }
 
     auto* event = new wxThreadEvent(wxEVT_P2P_PEER_FOUND);
-    event->SetString(wxString::FromUTF8(peerId.c_str(), peerId.size()));
+    event->SetString(wxString::FromUTF8(peerId.c_str(), static_cast<int>(peerId.size())));
+    wxQueueEvent(m_uiTarget, event);
+}
+
+void P2PNode::queueNetworkStatusEventToUi(const std::string& status)
+{
+    if (!m_uiTarget) {
+        return;
+    }
+
+    auto* event = new wxThreadEvent(wxEVT_P2P_NETWORK_STATUS);
+    event->SetString(wxString::FromUTF8(status.c_str(), static_cast<int>(status.size())));
     wxQueueEvent(m_uiTarget, event);
 }
