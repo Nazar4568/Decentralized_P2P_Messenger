@@ -38,4 +38,8 @@ public:
 
 private:
     std::set<std::string> seenMessageIds_; // replay protection
+};    std::string                generateMessageId();
+
+private:
+    std::set<std::string> seenMessageIds_; // replay protection
 };
