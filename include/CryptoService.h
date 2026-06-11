@@ -1,5 +1,3 @@
-//
-// Created by Roman Martakov on 09.05.26.
 #pragma once
 #include "Types.h"
 #include <set>
@@ -34,16 +32,10 @@ public:
                         const std::vector<unsigned char>& senderPublicKey);
 
     // --- Helpers (used internally and by other modules) ---
-    std::string toBase64(const std::vector<unsigned char>& data);
+    std::string                toBase64(const std::vector<unsigned char>& data);
     std::vector<unsigned char> fromBase64(const std::string& b64);
-    std::string generateMessageId();
+    std::string                generateMessageId();
 
 private:
     std::set<std::string> seenMessageIds_; // replay protection
 };
-//
-
-#ifndef P2P_MESSENGER_CRYPTOSERVICE_H
-#define P2P_MESSENGER_CRYPTOSERVICE_H
-
-#endif //P2P_MESSENGER_CRYPTOSERVICE_H
