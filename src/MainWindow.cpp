@@ -3,15 +3,35 @@
 
 #include <wx/sizer.h>
 
+namespace {
+
+// Outgoing bubble: right-aligned, light blue background, dark blue text.
+// Change SetBackgroundColour / SetTextColour to tune the "sent" appearance.
+const wxColour kOutgoingBg(220, 235, 255);
+const wxColour kOutgoingFg(20, 60, 140);
+
+// Incoming bubble: left-aligned, light green background, dark green text.
+// Change these constants to restyle received messages.
+const wxColour kIncomingBg(232, 245, 233);
+const wxColour kIncomingFg(27, 94, 32);
+
+const wxColour kSystemFg(100, 100, 100);
+const wxColour kTimestampFg(130, 130, 130);
+
+} // namespace
+
 MainWindow::MainWindow(std::shared_ptr<AppController> controller,
                        const std::string& peerId,
                        uint16_t port,
                        const std::string& bootstrapPort)
-    : wxFrame(nullptr, wxID_ANY, wxT("Decentralized P2P Messenger — Sprint 2"),
-              wxDefaultPosition, wxSize(900, 600))
+    : wxFrame(nullptr, wxID_ANY, wxT("Decentralized P2P Messenger — Sprint 3"),
+              wxDefaultPosition, wxSize(960, 640))
     , m_controller(std::move(controller))
     , m_bootstrapPort(bootstrapPort)
 {
+    CreateStatusBar(1);
+    GetStatusBar()->SetStatusText(wxT("Ready"));
+
     BuildUi();
     WireP2PEvents();
 
@@ -45,52 +65,62 @@ void MainWindow::BuildUi()
     bootstrapRow->AddStretchSpacer();
     rootSizer->Add(bootstrapRow, 0, wxEXPAND | wxLEFT | wxRIGHT | wxBOTTOM, 8);
 
-    auto* mainRow = new wxBoxSizer(wxHORIZONTAL);
+    // wxSplitterWindow: resizable left sidebar (contacts) + right panel (active chat).
+    m_splitter = new wxSplitterWindow(this, wxID_ANY, wxDefaultPosition, wxDefaultSize,
+                                      wxSP_LIVE_UPDATE | wxSP_3D);
+    m_splitter->SetMinimumPaneSize(180);
 
-    auto* contactsPanel = new wxBoxSizer(wxVERTICAL);
-    contactsPanel->Add(new wxStaticText(this, wxID_ANY, wxT("Contacts")),
+    auto* contactsPanel = new wxPanel(m_splitter);
+    auto* contactsSizer = new wxBoxSizer(wxVERTICAL);
+
+    contactsSizer->Add(new wxStaticText(contactsPanel, wxID_ANY, wxT("Contacts")),
                        0, wxBOTTOM, 4);
-    m_contactsList = new wxListBox(this, wxID_ANY);
-    contactsPanel->Add(m_contactsList, 1, wxEXPAND | wxBOTTOM, 8);
 
     auto* addContactRow = new wxBoxSizer(wxHORIZONTAL);
-    m_addContactInput = new wxTextCtrl(this, wxID_ANY, wxEmptyString,
+    m_addContactInput = new wxTextCtrl(contactsPanel, wxID_ANY, wxEmptyString,
                                        wxDefaultPosition, wxDefaultSize,
                                        wxTE_PROCESS_ENTER);
     addContactRow->Add(m_addContactInput, 1, wxEXPAND | wxRIGHT, 6);
-    m_addContactButton = new wxButton(this, wxID_ANY, wxT("Add"));
+    m_addContactButton = new wxButton(contactsPanel, wxID_ANY, wxT("Add Contact"));
     addContactRow->Add(m_addContactButton, 0);
-    contactsPanel->Add(addContactRow, 0, wxEXPAND);
+    contactsSizer->Add(addContactRow, 0, wxEXPAND | wxBOTTOM, 8);
 
-    mainRow->Add(contactsPanel, 1, wxEXPAND | wxRIGHT, 8);
+    m_contactsList = new wxListBox(contactsPanel, wxID_ANY);
+    contactsSizer->Add(m_contactsList, 1, wxEXPAND);
+    contactsPanel->SetSizer(contactsSizer);
 
-    auto* chatPanel = new wxBoxSizer(wxVERTICAL);
-    chatPanel->Add(new wxStaticText(this, wxID_ANY, wxT("Chat")),
-                    0, wxBOTTOM, 4);
-    m_chatLog = new wxListBox(this, wxID_ANY);
-    chatPanel->Add(m_chatLog, 1, wxEXPAND);
-    mainRow->Add(chatPanel, 2, wxEXPAND);
+    auto* chatPanel = new wxPanel(m_splitter);
+    auto* chatSizer = new wxBoxSizer(wxVERTICAL);
 
-    rootSizer->Add(mainRow, 1, wxEXPAND | wxLEFT | wxRIGHT, 8);
+    chatSizer->Add(new wxStaticText(chatPanel, wxID_ANY, wxT("Chat")),
+                   0, wxBOTTOM, 4);
+
+    m_chatLog = new wxRichTextCtrl(chatPanel, wxID_ANY, wxEmptyString,
+                                   wxDefaultPosition, wxDefaultSize,
+                                   wxTE_READONLY | wxTE_MULTILINE | wxBORDER_NONE);
+    m_chatLog->SetMinSize(wxSize(400, 300));
+    chatSizer->Add(m_chatLog, 1, wxEXPAND | wxBOTTOM, 8);
+
+    m_messageInput = new wxTextCtrl(chatPanel, wxID_ANY, wxEmptyString,
+                                    wxDefaultPosition, wxDefaultSize,
+                                    wxTE_MULTILINE | wxTE_PROCESS_ENTER);
+    m_messageInput->SetMinSize(wxSize(-1, 72));
+    chatSizer->Add(m_messageInput, 0, wxEXPAND | wxBOTTOM, 8);
 
     auto* peerRow = new wxBoxSizer(wxHORIZONTAL);
-    peerRow->Add(new wxStaticText(this, wxID_ANY, wxT("Send to:")),
+    peerRow->Add(new wxStaticText(chatPanel, wxID_ANY, wxT("Send to:")),
                  0, wxALIGN_CENTER_VERTICAL | wxRIGHT, 6);
-    m_peerIdInput = new wxTextCtrl(this, wxID_ANY);
-    peerRow->Add(m_peerIdInput, 1, wxEXPAND);
-    rootSizer->Add(peerRow, 0, wxEXPAND | wxLEFT | wxRIGHT | wxBOTTOM, 8);
+    m_peerIdInput = new wxTextCtrl(chatPanel, wxID_ANY);
+    peerRow->Add(m_peerIdInput, 1, wxEXPAND | wxRIGHT, 8);
+    m_sendButton = new wxButton(chatPanel, wxID_ANY, wxT("Send"));
+    peerRow->Add(m_sendButton, 0, wxALIGN_CENTER_VERTICAL);
+    chatSizer->Add(peerRow, 0, wxEXPAND);
 
-    m_messageInput = new wxTextCtrl(this, wxID_ANY, wxEmptyString,
-                                      wxDefaultPosition, wxDefaultSize,
-                                      wxTE_MULTILINE);
-    m_messageInput->SetMinSize(wxSize(-1, 80));
-    rootSizer->Add(m_messageInput, 0, wxEXPAND | wxLEFT | wxRIGHT | wxBOTTOM, 8);
+    chatPanel->SetSizer(chatSizer);
 
-    auto* actionRow = new wxBoxSizer(wxHORIZONTAL);
-    actionRow->AddStretchSpacer();
-    m_sendButton = new wxButton(this, wxID_ANY, wxT("Send"));
-    actionRow->Add(m_sendButton, 0, wxALIGN_CENTER_VERTICAL);
-    rootSizer->Add(actionRow, 0, wxEXPAND | wxALL, 8);
+    m_splitter->SplitVertically(contactsPanel, chatPanel, 240);
+
+    rootSizer->Add(m_splitter, 1, wxEXPAND | wxLEFT | wxRIGHT, 8);
 
     SetSizer(rootSizer);
     Layout();
@@ -103,35 +133,122 @@ void MainWindow::WireP2PEvents()
     m_addContactButton->Bind(wxEVT_BUTTON, &MainWindow::OnAddContactClicked, this);
     m_bootstrapButton->Bind(wxEVT_BUTTON, &MainWindow::OnBootstrapClicked, this);
     m_addContactInput->Bind(wxEVT_TEXT_ENTER, &MainWindow::OnAddContactClicked, this);
+    m_messageInput->Bind(wxEVT_TEXT_ENTER, &MainWindow::OnSendClicked, this);
+    m_messageInput->Bind(wxEVT_KEY_DOWN, &MainWindow::OnMessageKeyDown, this);
     m_contactsList->Bind(wxEVT_LISTBOX, &MainWindow::OnContactSelected, this);
 
     Bind(wxEVT_P2P_MESSAGE_RECEIVED, &MainWindow::OnP2PMessageReceived, this);
     Bind(wxEVT_P2P_PEER_FOUND, &MainWindow::OnP2PPeerFound, this);
     Bind(wxEVT_P2P_NETWORK_STATUS, &MainWindow::OnP2PNetworkStatus, this);
+    Bind(wxEVT_P2P_ERROR, &MainWindow::OnP2PError, this);
     Bind(wxEVT_CLOSE_WINDOW, &MainWindow::OnClose, this);
 }
 
-void MainWindow::OnSendClicked(wxCommandEvent& /*event*/)
+wxString MainWindow::CurrentTimestamp() const
+{
+    return wxDateTime::Now().Format(wxT("%H:%M:%S"));
+}
+
+void MainWindow::AppendChatMessage(ChatMessageKind kind,
+                                   const wxString& peerLabel,
+                                   const wxString& text,
+                                   const wxString& timestamp)
+{
+    const wxString ts = timestamp.IsEmpty() ? CurrentTimestamp() : timestamp;
+
+    wxRichTextAttr textAttr;
+    wxTextAttrAlignment alignment = wxTEXT_ALIGNMENT_LEFT;
+
+    if (kind == ChatMessageKind::Outgoing) {
+        // Right-aligned outgoing block — customize kOutgoingBg / kOutgoingFg above.
+        alignment = wxTEXT_ALIGNMENT_RIGHT;
+        textAttr.SetBackgroundColour(kOutgoingBg);
+        textAttr.SetTextColour(kOutgoingFg);
+    } else if (kind == ChatMessageKind::Incoming) {
+        // Left-aligned incoming block — customize kIncomingBg / kIncomingFg above.
+        alignment = wxTEXT_ALIGNMENT_LEFT;
+        textAttr.SetBackgroundColour(kIncomingBg);
+        textAttr.SetTextColour(kIncomingFg);
+    } else {
+        alignment = wxTEXT_ALIGNMENT_CENTRE;
+        textAttr.SetTextColour(kSystemFg);
+        textAttr.SetFontStyle(wxFONTSTYLE_ITALIC);
+    }
+
+    m_chatLog->BeginSuppressUndo();
+    m_chatLog->BeginAlignment(alignment);
+
+    wxRichTextAttr metaAttr;
+    metaAttr.SetTextColour(kTimestampFg);
+    metaAttr.SetFontSize(8);
+    m_chatLog->BeginStyle(metaAttr);
+    m_chatLog->WriteText(ts + wxT("  "));
+    m_chatLog->EndStyle();
+
+    m_chatLog->BeginStyle(textAttr);
+    if (kind == ChatMessageKind::Outgoing) {
+        m_chatLog->WriteText(wxT("[you -> ") + peerLabel + wxT("] ") + text);
+    } else if (kind == ChatMessageKind::Incoming) {
+        m_chatLog->WriteText(wxT("[") + peerLabel + wxT(" -> you] ") + text);
+    } else {
+        m_chatLog->WriteText(text);
+    }
+    m_chatLog->EndStyle();
+
+    m_chatLog->EndAlignment();
+    m_chatLog->Newline();
+    m_chatLog->EndSuppressUndo();
+
+    m_chatLog->ShowPosition(m_chatLog->GetLastPosition());
+}
+
+void MainWindow::AppendSystemLine(const wxString& text)
+{
+    AppendChatMessage(ChatMessageKind::System, wxEmptyString, text);
+}
+
+void MainWindow::SendCurrentMessage()
 {
     const wxString peerId = m_peerIdInput->GetValue().Trim();
     const wxString text = m_messageInput->GetValue();
 
     if (peerId.IsEmpty() || text.IsEmpty()) {
-        AppendChatLine(wxT("[system] Enter a recipient and message text."));
+        AppendSystemLine(wxT("[system] Enter a recipient and message text."));
+        GetStatusBar()->SetStatusText(wxT("Cannot send: missing recipient or message."));
         return;
     }
 
     m_controller->sendMessage(std::string(peerId.utf8_str()), std::string(text.utf8_str()));
 
-    AppendChatLine(wxT("[you -> ") + peerId + wxT("] ") + text);
+    AppendChatMessage(ChatMessageKind::Outgoing, peerId, text);
     m_messageInput->Clear();
+    GetStatusBar()->SetStatusText(wxT("Message sent to ") + peerId);
+}
+
+void MainWindow::OnSendClicked(wxCommandEvent& /*event*/)
+{
+    SendCurrentMessage();
+}
+
+void MainWindow::OnMessageKeyDown(wxKeyEvent& event)
+{
+    const int key = event.GetKeyCode();
+    if (key == WXK_RETURN || key == WXK_NUMPAD_ENTER) {
+        if (event.ShiftDown()) {
+            event.Skip(); // Shift+Enter: default behaviour inserts a newline.
+            return;
+        }
+        SendCurrentMessage();
+        return;
+    }
+    event.Skip();
 }
 
 void MainWindow::OnAddContactClicked(wxCommandEvent& /*event*/)
 {
     const wxString peerId = m_addContactInput->GetValue().Trim();
     if (peerId.IsEmpty()) {
-        AppendChatLine(wxT("[system] Enter a peer ID to add."));
+        AppendSystemLine(wxT("[system] Enter a peer ID to add."));
         return;
     }
 
@@ -139,19 +256,19 @@ void MainWindow::OnAddContactClicked(wxCommandEvent& /*event*/)
     AddContactToList(peerId);
     m_peerIdInput->SetValue(peerId);
     m_addContactInput->Clear();
-    AppendChatLine(wxT("[system] Looking up peer: ") + peerId);
+    AppendSystemLine(wxT("[system] Looking up peer: ") + peerId);
 }
 
 void MainWindow::OnBootstrapClicked(wxCommandEvent& /*event*/)
 {
     const wxString port = m_bootstrapPortInput->GetValue().Trim();
     if (port.IsEmpty() || port == wxT("0")) {
-        AppendChatLine(wxT("[system] Enter a bootstrap port (not 0)."));
+        AppendSystemLine(wxT("[system] Enter a bootstrap port (not 0)."));
         return;
     }
 
     m_controller->bootstrap("127.0.0.1", std::string(port.utf8_str()));
-    AppendChatLine(wxT("[system] Bootstrapping to 127.0.0.1:") + port);
+    AppendSystemLine(wxT("[system] Bootstrapping to 127.0.0.1:") + port);
 }
 
 void MainWindow::OnContactSelected(wxCommandEvent& /*event*/)
@@ -161,7 +278,33 @@ void MainWindow::OnContactSelected(wxCommandEvent& /*event*/)
         return;
     }
 
-    m_peerIdInput->SetValue(m_contactsList->GetString(selection));
+    const wxString contactId = m_contactsList->GetString(selection);
+    m_peerIdInput->SetValue(contactId);
+    m_activeContactId = std::string(contactId.utf8_str());
+    loadChatHistory(m_activeContactId);
+}
+
+void MainWindow::loadChatHistory(const std::string& contactId)
+{
+    // Sprint 3 UI mock: populate the chat pane with placeholder history.
+    // Replace with MessageStorage / backend integration in a later sprint.
+    m_chatLog->Clear();
+    AppendSystemLine(wxString::Format(
+        wxT("[system] Chat history for %s (mock data)"),
+        wxString::FromUTF8(contactId.c_str(), static_cast<int>(contactId.size()))));
+
+    const wxString contactWx = wxString::FromUTF8(contactId.c_str(),
+                                                  static_cast<int>(contactId.size()));
+
+    AppendChatMessage(ChatMessageKind::Incoming, contactWx,
+                      wxT("Hey! This is a mock historical message."),
+                      wxT("09:12:05"));
+    AppendChatMessage(ChatMessageKind::Outgoing, contactWx,
+                      wxT("Mock reply from a previous session."),
+                      wxT("09:12:41"));
+    AppendChatMessage(ChatMessageKind::Incoming, contactWx,
+                      wxT("End-to-end encryption will be transparent to this view."),
+                      wxT("09:13:02"));
 }
 
 void MainWindow::OnClose(wxCloseEvent& event)
@@ -176,16 +319,25 @@ void MainWindow::OnP2PMessageReceived(wxThreadEvent& event)
     wxString text;
     ParseMessageReceivedEvent(event, fromPeerId, text);
 
-    AddContactToList(fromPeerId);
-    const wxString sender = fromPeerId.IsEmpty() ? wxT("unknown") : fromPeerId;
-    AppendChatLine(wxT("[") + sender + wxT(" -> you] ") + text);
+    wxString sender = fromPeerId.Trim();
+    if (sender.IsEmpty() && !text.IsEmpty()) {
+        // Fallback when legacy payloads omit the sender prefix.
+        sender = m_peerIdInput->GetValue().Trim();
+    }
+    if (sender.IsEmpty()) {
+        AppendSystemLine(wxT("[system] Received a message with an unknown sender."));
+        return;
+    }
+
+    AddContactToList(sender);
+    AppendChatMessage(ChatMessageKind::Incoming, sender, text);
 }
 
 void MainWindow::OnP2PPeerFound(wxThreadEvent& event)
 {
     const wxString peerId = event.GetString();
     AddContactToList(peerId);
-    AppendChatLine(wxT("[system] Peer found on DHT: ") + peerId);
+    AppendSystemLine(wxT("[system] Peer found on DHT: ") + peerId);
 }
 
 void MainWindow::OnP2PNetworkStatus(wxThreadEvent& event)
@@ -193,9 +345,26 @@ void MainWindow::OnP2PNetworkStatus(wxThreadEvent& event)
     UpdateNetworkStatus(event.GetString());
 }
 
-void MainWindow::AppendChatLine(const wxString& line)
+void MainWindow::OnP2PError(wxThreadEvent& event)
 {
-    m_chatLog->Append(line);
+    wxString code;
+    wxString message;
+    ParseP2PErrorEvent(event, code, message);
+    ShowError(code, message);
+}
+
+void MainWindow::ShowError(const wxString& code, const wxString& message)
+{
+    AppendSystemLine(wxT("[error] ") + message);
+    GetStatusBar()->SetStatusText(message);
+
+    if (code == wxString::FromUTF8(P2PErrorCode::DecryptionFailed) ||
+        code == wxString::FromUTF8(P2PErrorCode::NetworkUnavailable)) {
+        wxMessageBox(message, wxT("P2P Error"), wxOK | wxICON_ERROR, this);
+    } else if (code == wxString::FromUTF8(P2PErrorCode::PeerNotFound) ||
+               code == wxString::FromUTF8(P2PErrorCode::DeliveryFailed)) {
+        wxMessageBox(message, wxT("P2P Warning"), wxOK | wxICON_WARNING, this);
+    }
 }
 
 void MainWindow::AddContactToList(const wxString& peerId)

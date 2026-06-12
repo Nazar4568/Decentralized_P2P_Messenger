@@ -3,20 +3,21 @@
 #include "AppController.h"
 
 #include <memory>
+#include <string>
 
 #include <wx/button.h>
 #include <wx/frame.h>
 #include <wx/listbox.h>
+#include <wx/richtext/richtextctrl.h>
+#include <wx/splitter.h>
 #include <wx/stattext.h>
 #include <wx/textctrl.h>
 
 /**
- * Main chat window (wxFrame).
+ * Main chat window (wxFrame) — Sprint 3.
  *
- * Thread-safety contract:
- *   - P2PNode OpenDHT callbacks call wxQueueEvent(m_uiTarget, ...).
- *   - This frame is m_uiTarget (wxEvtHandler).
- *   - Bind() handlers run on the GUI thread and may safely modify controls.
+ * Thread-safety: P2PNode queues wxThreadEvent; Bind() handlers run on the GUI thread only.
+ * Crypto: UI handles plaintext only; encryption stays in the backend.
  */
 class MainWindow : public wxFrame {
 public:
@@ -26,6 +27,8 @@ public:
                const std::string& bootstrapPort);
 
 private:
+    enum class ChatMessageKind { Incoming, Outgoing, System };
+
     void BuildUi();
     void WireP2PEvents();
 
@@ -33,22 +36,34 @@ private:
     void OnAddContactClicked(wxCommandEvent& event);
     void OnBootstrapClicked(wxCommandEvent& event);
     void OnContactSelected(wxCommandEvent& event);
+    void OnMessageKeyDown(wxKeyEvent& event);
     void OnClose(wxCloseEvent& event);
 
     void OnP2PMessageReceived(wxThreadEvent& event);
     void OnP2PPeerFound(wxThreadEvent& event);
     void OnP2PNetworkStatus(wxThreadEvent& event);
+    void OnP2PError(wxThreadEvent& event);
 
-    void AppendChatLine(const wxString& line);
+    void SendCurrentMessage();
+    void AppendChatMessage(ChatMessageKind kind,
+                           const wxString& peerLabel,
+                           const wxString& text,
+                           const wxString& timestamp = wxEmptyString);
+    void AppendSystemLine(const wxString& text);
     void AddContactToList(const wxString& peerId);
     void UpdateNetworkStatus(const wxString& status);
+    void ShowError(const wxString& code, const wxString& message);
+    void loadChatHistory(const std::string& contactId);
+    wxString CurrentTimestamp() const;
 
     std::shared_ptr<AppController> m_controller;
     std::string m_bootstrapPort;
+    std::string m_activeContactId;
 
     wxStaticText* m_statusText{nullptr};
+    wxSplitterWindow* m_splitter{nullptr};
     wxListBox* m_contactsList{nullptr};
-    wxListBox* m_chatLog{nullptr};
+    wxRichTextCtrl* m_chatLog{nullptr};
     wxTextCtrl* m_addContactInput{nullptr};
     wxTextCtrl* m_peerIdInput{nullptr};
     wxTextCtrl* m_messageInput{nullptr};

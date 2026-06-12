@@ -15,9 +15,13 @@ void AppController::bindUiTarget(wxEvtHandler* target)
 
 void AppController::configure(const std::string& peerId, uint16_t port)
 {
-    m_peerId = peerId;
+    if (peerId.empty()) {
+        m_peerId = "user1";
+    } else {
+        m_peerId = peerId;
+    }
     m_port = port;
-    m_node->setNodeConfig(port, peerId);
+    m_node->setNodeConfig(port, m_peerId);
 }
 
 void AppController::start(const std::string& bootstrapHost, const std::string& bootstrapPort)
