@@ -6,9 +6,36 @@
 #include <iostream>
 #include <wx/event.h>
 
-wxDEFINE_EVENT(wxEVT_P2P_MESSAGE_RECEIVED, wxThreadEvent);
+wxIMPLEMENT_DYNAMIC_CLASS(P2PMessageThreadEvent, wxThreadEvent);
+
+wxDEFINE_EVENT(wxEVT_P2P_MESSAGE_RECEIVED, P2PMessageThreadEvent);
 wxDEFINE_EVENT(wxEVT_P2P_PEER_FOUND, wxThreadEvent);
 wxDEFINE_EVENT(wxEVT_P2P_NETWORK_STATUS, wxThreadEvent);
+wxDEFINE_EVENT(wxEVT_P2P_ERROR, wxThreadEvent);
+
+namespace {
+
+constexpr char kDhtFieldSep = '\x1F';
+
+bool ParseDhtMessagePayload(const std::string& payload,
+                            std::string& outSenderId,
+                            std::string& outBody)
+{
+    auto sep = payload.find(kDhtFieldSep);
+    if (sep == std::string::npos) {
+        // Legacy Sprint 2 format: "senderId:plaintext" (first colon only).
+        sep = payload.find(':');
+        if (sep == std::string::npos) {
+            return false;
+        }
+    }
+
+    outSenderId = payload.substr(0, sep);
+    outBody = payload.substr(sep + 1);
+    return true;
+}
+
+} // namespace
 
 P2PNode::P2PNode() = default;
 
@@ -20,7 +47,9 @@ P2PNode::~P2PNode()
 void P2PNode::setNodeConfig(uint16_t port, const std::string& id)
 {
     m_port = port;
-    m_myId = id;
+    if (!id.empty()) {
+        m_myId = id;
+    }
 }
 
 void P2PNode::bindUiTarget(wxEvtHandler* target)
@@ -63,15 +92,21 @@ void P2PNode::startNode()
             }
             for (const auto& value : values) {
                 const std::string payload(value->data.begin(), value->data.end());
-                const size_t delimiter = payload.find(':');
-                if (delimiter == std::string::npos) {
+
+                std::string senderId;
+                std::string text;
+                if (!ParseDhtMessagePayload(payload, senderId, text)) {
                     continue;
                 }
 
-                const std::string senderId = payload.substr(0, delimiter);
-                const std::string text = payload.substr(delimiter + 1);
+                if (senderId.empty()) {
+                    std::cerr << "[DHT] Dropping message with missing sender ID\n";
+                    notifyError(P2PErrorCode::DecryptionFailed,
+                                "Received a message without a sender ID");
+                    continue;
+                }
 
-                if (senderId.empty() || senderId == m_myId) {
+                if (senderId == m_myId) {
                     continue;
                 }
 
@@ -115,6 +150,12 @@ void P2PNode::stopNode()
 void P2PNode::sendMessage(const std::string& toPeerId, const std::string& text)
 {
 #ifdef HAS_OPENDHT
+    if (m_myId.empty()) {
+        notifyError(P2PErrorCode::NetworkUnavailable,
+                    "Cannot send: local peer ID is not configured (set P2P_PEER_ID)");
+        return;
+    }
+
     EncryptedPacket packet;
     packet.senderId = m_myId;
     packet.receiverId = toPeerId;
@@ -159,6 +200,7 @@ void P2PNode::publishProfile(const UserProfile& profile)
         } else {
             std::cerr << "[DHT] Failed to publish profile.\n";
             notifyNetworkStatus("Failed to publish profile");
+            notifyError(P2PErrorCode::NetworkUnavailable, "Failed to publish profile to DHT");
         }
     });
 #else
@@ -178,6 +220,8 @@ void P2PNode::findPeer(const std::string& userId)
         [this, userId](const std::vector<std::shared_ptr<dht::Value>>& values) {
             if (values.empty()) {
                 notifyNetworkStatus("Peer not found on DHT: " + userId);
+                notifyError(P2PErrorCode::PeerNotFound,
+                            "Peer not found on DHT: " + userId);
                 return true;
             }
 
@@ -201,8 +245,16 @@ void P2PNode::findPeer(const std::string& userId)
 void P2PNode::sendPacket(const std::string& receiverId, const EncryptedPacket& packet)
 {
 #ifdef HAS_OPENDHT
+    std::string senderId = packet.senderId.empty() ? m_myId : packet.senderId;
+    if (senderId.empty()) {
+        notifyError(P2PErrorCode::NetworkUnavailable,
+                    "Cannot send packet: sender ID is missing");
+        return;
+    }
+
     const dht::InfoHash key = dht::InfoHash::get(receiverId + "_inbox");
-    const std::string payload = packet.senderId + ":" + packet.ciphertext;
+    // Wire format: "senderId<body>" with unit separator (same byte as UI events).
+    const std::string payload = senderId + kDhtFieldSep + packet.ciphertext;
 
     std::cout << "[P2PNode] Sending to " << receiverId << "...\n";
     notifyNetworkStatus("Sending message to " + receiverId);
@@ -214,6 +266,8 @@ void P2PNode::sendPacket(const std::string& receiverId, const EncryptedPacket& p
         } else {
             std::cerr << "[DHT] Failed to deliver message.\n";
             notifyNetworkStatus("Failed to deliver message to " + receiverId);
+            notifyError(P2PErrorCode::DeliveryFailed,
+                        "Failed to deliver message to " + receiverId);
         }
     });
 #else
@@ -270,17 +324,19 @@ void P2PNode::notifyNetworkStatus(const std::string& status)
     queueNetworkStatusEventToUi(status);
 }
 
+void P2PNode::notifyError(const std::string& code, const std::string& message)
+{
+    queueErrorEventToUi(code, message);
+}
+
 void P2PNode::queueMessageEventToUi(const std::string& fromPeerId, const std::string& text)
 {
     if (!m_uiTarget) {
         return;
     }
 
-    const wxString fromWx = wxString::FromUTF8(fromPeerId.c_str(), static_cast<int>(fromPeerId.size()));
-    const wxString textWx = wxString::FromUTF8(text.c_str(), static_cast<int>(text.size()));
-
-    auto* event = new wxThreadEvent(wxEVT_P2P_MESSAGE_RECEIVED);
-    event->SetString(fromWx + wxT("|") + textWx);
+    auto* event = new P2PMessageThreadEvent(wxEVT_P2P_MESSAGE_RECEIVED);
+    event->SetMessageData(fromPeerId, text);
     wxQueueEvent(m_uiTarget, event);
 }
 
@@ -306,57 +362,16 @@ void P2PNode::queueNetworkStatusEventToUi(const std::string& status)
     wxQueueEvent(m_uiTarget, event);
 }
 
-void P2PNode::bootstrap(const std::string& ip, const std::string& port)
+void P2PNode::queueErrorEventToUi(const std::string& code, const std::string& message)
 {
-    std::cout << "[P2PNode] Connecting to " << ip << ":" << port << "...\n";
-    m_dht.bootstrap(ip, port);
-}
-void P2PNode::publishProfile(const UserProfile& profile)
-{
+    if (!m_uiTarget) {
+        return;
+    }
 
-    dht::InfoHash key = dht::InfoHash::get(profile.userId);
+    const wxString codeWx = wxString::FromUTF8(code.c_str(), static_cast<int>(code.size()));
+    const wxString msgWx = wxString::FromUTF8(message.c_str(), static_cast<int>(message.size()));
 
-    std::string payload = profile.displayName + "|" + profile.tcpEndpoint;
-
-    std::cout << "[P2PNode] Publishing a profile by key: " << profile.userId << "...\n";
-
-
-    m_dht.put(key, payload, [](bool success) {
-        if (success) {
-            std::cout << "[DHT] Success! The profile has been replicated across the network..\n";
-        } else {
-            std::cerr << "[DHT] Error: Failed to publish profile.\n";
-        }
-    });
-}
-
-void P2PNode::findPeer(const std::string& userId) {
-    dht::InfoHash key = dht::InfoHash::get(userId);
-    std::cout << "[P2PNode] Searching for peer: " << userId << "...\n";
-
-    dht::GetCallback callback = [this, userId](const std::vector<std::shared_ptr<dht::Value>>& values) {
-        for (const auto& value : values) {
-            std::string payload(value->data.begin(), value->data.end());
-            std::cout << "[DHT] Peer found (" << userId << "): " << payload << "\n";
-            this->notifyPeerFound(userId);
-        }
-        return true;
-    };
-    m_dht.get(key, callback);
-}
-void P2PNode::sendPacket(const std::string& receiverId, const EncryptedPacket& packet)
-{
-    dht::InfoHash key = dht::InfoHash::get(receiverId + "_inbox");
-
-    std::string payload = packet.senderId + ":" + packet.ciphertext;
-
-    std::cout << "[P2PNode] Sending packet to " << receiverId << "...\n";
-
-    m_dht.put(key, payload, [](bool success) {
-        if (success) {
-            std::cout << "[DHT] Packet delivered to DHT network.\n";
-        } else {
-            std::cerr << "[DHT] Error: Failed to deliver packet.\n";
-        }
-    });
+    auto* event = new wxThreadEvent(wxEVT_P2P_ERROR);
+    event->SetString(codeWx + wxT("|") + msgWx);
+    wxQueueEvent(m_uiTarget, event);
 }

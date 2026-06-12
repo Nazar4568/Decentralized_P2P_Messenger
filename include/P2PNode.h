@@ -47,9 +47,11 @@ private:
     void notifyMessageReceived(const std::string& fromPeerId, const std::string& text);
     void notifyPeerFound(const std::string& peerId);
     void notifyNetworkStatus(const std::string& status);
+    void notifyError(const std::string& code, const std::string& message);
     void queueMessageEventToUi(const std::string& fromPeerId, const std::string& text);
     void queuePeerFoundEventToUi(const std::string& peerId);
     void queueNetworkStatusEventToUi(const std::string& status);
+    void queueErrorEventToUi(const std::string& code, const std::string& message);
 
 #ifdef HAS_OPENDHT
     dht::DhtRunner m_dht;
