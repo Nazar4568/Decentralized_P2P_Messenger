@@ -6,7 +6,7 @@
 #ifdef HAS_OPENDHT
 #include <opendht.h>
 #endif
-
+#include "CryptoService.h"
 #include <atomic>
 #include <cstdint>
 #include <memory>
@@ -44,6 +44,8 @@ public:
     bool isRunning() const { return m_running; }
 
 private:
+    std::shared_ptr<CryptoService> m_crypto;
+    KeyPair m_myKeys;
     void notifyMessageReceived(const std::string& fromPeerId, const std::string& text);
     void notifyPeerFound(const std::string& peerId);
     void notifyNetworkStatus(const std::string& status);

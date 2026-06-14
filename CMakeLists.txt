@@ -69,7 +69,18 @@ endif()
 # OpenDHT — real P2P networking for Sprint 2
 set(HAS_OPENDHT OFF)
 
-find_package(opendht QUIET)
+
+if(APPLE)
+    set(ENV{PKG_CONFIG_PATH} "/opt/homebrew/lib/pkgconfig:$ENV{PKG_CONFIG_PATH}")
+
+    find_package(PkgConfig REQUIRED)
+
+    pkg_check_modules(GnuTLS REQUIRED IMPORTED_TARGET gnutls)
+endif()
+
+if(NOT APPLE)
+    find_package(opendht QUIET)
+endif()
 
 if(TARGET opendht-static)
     # Debian/Ubuntu libopendht-dev exports opendht-static with full transitive deps
@@ -83,9 +94,9 @@ elseif(PkgConfig_FOUND)
     pkg_check_modules(OPENDHT QUIET opendht)
     if(OPENDHT_FOUND)
         set(HAS_OPENDHT ON)
-        target_include_directories(Decentralized_P2P_Messenger PRIVATE ${OPENDHT_INCLUDE_DIRS})
+        target_include_directories(Decentralized_P2P_Messenger PRIVATE ${OPENDHT_INCLUDE_DIRS} "/opt/homebrew/include")
         if(OPENDHT_LIBRARY_DIRS)
-            target_link_directories(Decentralized_P2P_Messenger PRIVATE ${OPENDHT_LIBRARY_DIRS})
+            target_link_directories(Decentralized_P2P_Messenger PRIVATE ${OPENDHT_LIBRARY_DIRS} "/opt/homebrew/lib")
         endif()
         # pkg-config Libs omit private deps needed when linking the static archive
         pkg_check_modules(JSONCPP QUIET jsoncpp)
