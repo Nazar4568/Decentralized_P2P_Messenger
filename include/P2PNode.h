@@ -70,5 +70,12 @@ private:
 
     uint16_t m_port{4222};
     std::string m_myId{"default_node"};
-    bool m_running{false};
+
+    //MADE ATOMIC: Threads can now safely read and change this flag
+    std::atomic<bool> m_running{false};
+
+    // sprint 4:
+    UserProfile m_currentProfile;                 // Remember our profile
+    std::unique_ptr<std::thread> m_publishThread; // Our background "worker"
+    void backgroundPublishLoop();                 // The code that the worker will execute
 };

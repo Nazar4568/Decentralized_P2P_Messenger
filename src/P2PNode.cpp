@@ -1,6 +1,6 @@
 #include "../include/P2PNode.h"
 #include "../include/P2PWxEvents.h"
-
+#include <filesystem>
 #include "../include/Types.h"
 #include <chrono>
 #include <iostream>
@@ -76,12 +76,33 @@ void P2PNode::startNode()
     }
 
 #ifdef HAS_OPENDHT
-    // INITIALIZATION: Starting cryptography and generating keys
     m_crypto = std::make_shared<CryptoService>();
-    m_myKeys = m_crypto->generateKeyPair();
-    std::cout << "[Crypto] Ключи сессии сгенерированы!\n";
 
-    // Starting the P2P engine
+    // --- key initialization (sprint 4) ---
+    std::string pubKeyFile = m_myId + "_public.key";
+    std::string privKeyFile = m_myId + "_private.key";
+
+    // Check if the key files already exist on hard drive.
+    if (std::filesystem::exists(pubKeyFile) && std::filesystem::exists(privKeyFile)) {
+        try {
+            m_myKeys = m_crypto->loadKeyPair(pubKeyFile, privKeyFile);
+            std::cout << "[Crypto] Keys have been successfully taken from disk for the user.: " << m_myId << "\n";
+        } catch (const std::exception& e) {
+            std::cerr << "[Crypto] Error reading keys: " << e.what() << ". Generating new...\n";
+            m_myKeys = m_crypto->generateKeyPair();
+            m_crypto->saveKeyPair(m_myKeys, pubKeyFile, privKeyFile);
+        }
+    } else {
+        // No files (first run). Generate new keys and save them to disk.
+        std::cout << "[Crypto] First launch. Generating and saving keys for: " << m_myId << "\n";
+        m_myKeys = m_crypto->generateKeyPair();
+        if (m_crypto->saveKeyPair(m_myKeys, pubKeyFile, privKeyFile)) {
+            std::cout << "[Crypto] The keys have been successfully saved to disk.\n";
+        } else {
+            std::cerr << "[Crypto] WARNING: Failed to save keys to disk.!\n";
+        }
+    }
+
     const auto id = dht::crypto::generateIdentity();
     m_dht.run(m_port, id, true);
     m_running = true;
@@ -174,6 +195,8 @@ void P2PNode::startNode()
     // We put our listener on permanent background work
     m_dht.listen(listenKey, onMessageReceived);
     notifyNetworkStatus("Listening for secure messages on " + m_myId + "_inbox");
+    // Hire a background worker and give it a task (backgroundPublishLoop method)
+    m_publishThread = std::make_unique<std::thread>(&P2PNode::backgroundPublishLoop, this);
 #else
     m_running = true;
     std::cout << "[P2PNode] Mock node started.\n";
@@ -183,11 +206,18 @@ void P2PNode::startNode()
 
 void P2PNode::stopNode()
 {
-    if (!m_running) {
-        return;
-    }
+    if (!m_running) return;
+
+
+    // This is a signal for our while(m_running) loop to terminate immediately.
+    m_running = false;
 
 #ifdef HAS_OPENDHT
+    // We wait until the background thread finishes its work and exits the function.
+    if (m_publishThread && m_publishThread->joinable()) {
+        m_publishThread->join();
+    }
+    // Only now can we safely turn off the DHT network
     m_dht.join();
 #else
     if (m_mockThread && m_mockThread->joinable()) {
@@ -196,7 +226,6 @@ void P2PNode::stopNode()
     m_mockThread.reset();
 #endif
 
-    m_running = false;
     notifyNetworkStatus("Node stopped");
     std::cout << "[P2PNode] Node stopped.\n";
 }
@@ -240,6 +269,7 @@ void P2PNode::bootstrap(const std::string& ip, const std::string& port)
 
 void P2PNode::publishProfile(const UserProfile& profile)
 {
+    m_currentProfile = profile;
 #ifdef HAS_OPENDHT
     const dht::InfoHash key = dht::InfoHash::get(profile.userId);
 
@@ -340,11 +370,11 @@ void P2PNode::sendPacket(const std::string& receiverId, const EncryptedPacket& p
 
             dht::InfoHash inboxKey = dht::InfoHash::get(receiverId + "_inbox");
             m_dht.put(inboxKey, fullPayload, [receiverId](bool success) {
-                if (success) std::cout << "[DHT] Зашифрованный пакет доставлен!\n";
+                if (success) std::cout << "[DHT] The encrypted package has been delivered!\n";
             });
 
         } catch (const std::exception& e) {
-            std::cerr << "[Crypto] Ошибка шифрования: " << e.what() << "\n";
+            std::cerr << "[Crypto] Encryption error: " << e.what() << "\n";
         }
         return true;
     };
@@ -454,4 +484,34 @@ void P2PNode::queueErrorEventToUi(const std::string& code, const std::string& me
     auto* event = new wxThreadEvent(wxEVT_P2P_ERROR);
     event->SetString(codeWx + wxT("|") + msgWx);
     wxQueueEvent(m_uiTarget, event);
+}
+
+void P2PNode::backgroundPublishLoop()
+{
+    int secondsPassed = 0;
+
+    // While the m_running flag == true, the worker lives
+    while (m_running) {
+        // We sleep for exactly 1 second
+        std::this_thread::sleep_for(std::chrono::seconds(1));
+
+        // If the user presses "Exit" during sleep, we immediately interrupt the cycle.
+        if (!m_running) break;
+
+        secondsPassed++;
+
+        // wait 10 min
+        if (secondsPassed >= 600) {
+            secondsPassed = 0; //Reset the stopwatch
+
+            // If the profile has already been created by the user, we publish it again!
+            if (!m_currentProfile.userId.empty()) {
+                std::cout << "[P2PNode] Background profile refresh (TTL refresh)...\n";
+
+                // We call our own method. It will send the packet to the DHT.
+                publishProfile(m_currentProfile);
+            }
+        }
+    }
+    std::cout << "[P2PNode] The background worker thread has completed successfully.\n";
 }
