@@ -1,7 +1,13 @@
 #include "../include/MainWindow.h"
+#include "../include/AboutDialog.h"
+#include "../include/ExportIdentityDialog.h"
 #include "../include/P2PWxEvents.h"
 
+#include <wx/menu.h>
 #include <wx/sizer.h>
+
+#include <thread>
+#include <utility>
 
 namespace {
 
@@ -18,13 +24,17 @@ const wxColour kIncomingFg(27, 94, 32);
 const wxColour kSystemFg(100, 100, 100);
 const wxColour kTimestampFg(130, 130, 130);
 
+enum {
+    ID_EXPORT_IDENTITY = wxID_HIGHEST + 100,
+};
+
 } // namespace
 
 MainWindow::MainWindow(std::shared_ptr<AppController> controller,
                        const std::string& peerId,
                        uint16_t port,
                        const std::string& bootstrapPort)
-    : wxFrame(nullptr, wxID_ANY, wxT("Decentralized P2P Messenger — Sprint 3"),
+    : wxFrame(nullptr, wxID_ANY, wxT("Decentralized P2P Messenger — Sprint 4"),
               wxDefaultPosition, wxSize(960, 640))
     , m_controller(std::move(controller))
     , m_bootstrapPort(bootstrapPort)
@@ -32,17 +42,47 @@ MainWindow::MainWindow(std::shared_ptr<AppController> controller,
     CreateStatusBar(1);
     GetStatusBar()->SetStatusText(wxT("Ready"));
 
+    BuildMenuBar();
     BuildUi();
     WireP2PEvents();
 
     m_controller->bindUiTarget(this);
     m_controller->configure(peerId, port);
-    m_controller->start("127.0.0.1", m_bootstrapPort);
 
     UpdateNetworkStatus(wxString::Format(
         wxT("Peer: %s | Port: %u | Status: Starting..."),
         wxString::FromUTF8(peerId.c_str(), static_cast<int>(peerId.size())),
         port));
+
+    // Start the network OFF the GUI thread: identity (RSA) generation and DHT
+    // bring-up are slow and would otherwise freeze the window on launch.
+    // All status/peer/message updates flow back via wxQueueEvent (thread-safe).
+    auto controllerRef = m_controller;
+    const std::string bootstrapHost = "127.0.0.1";
+    const std::string bootstrapPortValue = m_bootstrapPort;
+    m_startupThread = std::thread([controllerRef, bootstrapHost, bootstrapPortValue]() {
+        controllerRef->start(bootstrapHost, bootstrapPortValue);
+    });
+}
+
+void MainWindow::BuildMenuBar()
+{
+    auto* menuBar = new wxMenuBar();
+
+    auto* fileMenu = new wxMenu();
+    fileMenu->Append(ID_EXPORT_IDENTITY, wxT("&Export Identity…\tCtrl+E"),
+                     wxT("Copy or save your User ID and public key"));
+    fileMenu->AppendSeparator();
+    fileMenu->Append(wxID_EXIT, wxT("E&xit\tCtrl+Q"));
+
+    auto* helpMenu = new wxMenu();
+    helpMenu->Append(wxID_ABOUT, wxT("&About…"),
+                     wxT("About this project"));
+
+    menuBar->Append(fileMenu, wxT("&File"));
+    menuBar->Append(helpMenu, wxT("&Help"));
+
+    SetMenuBar(menuBar);
 }
 
 void MainWindow::BuildUi()
@@ -87,6 +127,11 @@ void MainWindow::BuildUi()
 
     m_contactsList = new wxListBox(contactsPanel, wxID_ANY);
     contactsSizer->Add(m_contactsList, 1, wxEXPAND);
+
+    m_identityButton = new wxButton(contactsPanel, wxID_ANY,
+                                    wxT("My Identity / Export"));
+    contactsSizer->Add(m_identityButton, 0, wxEXPAND | wxTOP, 8);
+
     contactsPanel->SetSizer(contactsSizer);
 
     auto* chatPanel = new wxPanel(m_splitter);
@@ -136,6 +181,11 @@ void MainWindow::WireP2PEvents()
     m_messageInput->Bind(wxEVT_TEXT_ENTER, &MainWindow::OnSendClicked, this);
     m_messageInput->Bind(wxEVT_KEY_DOWN, &MainWindow::OnMessageKeyDown, this);
     m_contactsList->Bind(wxEVT_LISTBOX, &MainWindow::OnContactSelected, this);
+    m_identityButton->Bind(wxEVT_BUTTON, &MainWindow::OnExportIdentity, this);
+
+    Bind(wxEVT_MENU, &MainWindow::OnExportIdentity, this, ID_EXPORT_IDENTITY);
+    Bind(wxEVT_MENU, &MainWindow::OnShowAbout, this, wxID_ABOUT);
+    Bind(wxEVT_MENU, &MainWindow::OnExit, this, wxID_EXIT);
 
     Bind(wxEVT_P2P_MESSAGE_RECEIVED, &MainWindow::OnP2PMessageReceived, this);
     Bind(wxEVT_P2P_PEER_FOUND, &MainWindow::OnP2PPeerFound, this);
@@ -280,37 +330,74 @@ void MainWindow::OnContactSelected(wxCommandEvent& /*event*/)
 
     const wxString contactId = m_contactsList->GetString(selection);
     m_peerIdInput->SetValue(contactId);
-    m_activeContactId = std::string(contactId.utf8_str());
+
+    const std::string newContactId = std::string(contactId.utf8_str());
+    if (newContactId == m_activeContactId) {
+        // Re-selecting the active contact must not wipe the visible conversation.
+        return;
+    }
+
+    m_activeContactId = newContactId;
     loadChatHistory(m_activeContactId);
 }
 
 void MainWindow::loadChatHistory(const std::string& contactId)
 {
-    // Sprint 3 UI mock: populate the chat pane with placeholder history.
-    // Replace with MessageStorage / backend integration in a later sprint.
+    // Persistent history is not wired yet; start each conversation with a clean,
+    // honest header instead of placeholder/mock messages.
     m_chatLog->Clear();
     AppendSystemLine(wxString::Format(
-        wxT("[system] Chat history for %s (mock data)"),
+        wxT("[system] Conversation with %s"),
         wxString::FromUTF8(contactId.c_str(), static_cast<int>(contactId.size()))));
+    AppendSystemLine(wxT("[system] Messages are end-to-end encrypted."));
+}
 
-    const wxString contactWx = wxString::FromUTF8(contactId.c_str(),
-                                                  static_cast<int>(contactId.size()));
+void MainWindow::OnExportIdentity(wxCommandEvent& /*event*/)
+{
+    const std::string userId = m_controller->localPeerId();
+    const std::string publicKey = m_controller->localPublicKeyBase64();
 
-    AppendChatMessage(ChatMessageKind::Incoming, contactWx,
-                      wxT("Hey! This is a mock historical message."),
-                      wxT("09:12:05"));
-    AppendChatMessage(ChatMessageKind::Outgoing, contactWx,
-                      wxT("Mock reply from a previous session."),
-                      wxT("09:12:41"));
-    AppendChatMessage(ChatMessageKind::Incoming, contactWx,
-                      wxT("End-to-end encryption will be transparent to this view."),
-                      wxT("09:13:02"));
+    ExportIdentityDialog dialog(
+        this,
+        wxString::FromUTF8(userId.c_str(), static_cast<int>(userId.size())),
+        wxString::FromUTF8(publicKey.c_str(), static_cast<int>(publicKey.size())));
+    dialog.ShowModal();
+}
+
+void MainWindow::OnShowAbout(wxCommandEvent& /*event*/)
+{
+    AboutDialog dialog(this);
+    dialog.ShowModal();
+}
+
+void MainWindow::OnExit(wxCommandEvent& /*event*/)
+{
+    Close();
 }
 
 void MainWindow::OnClose(wxCloseEvent& event)
 {
-    m_controller->stop();
-    event.Skip();
+    if (m_shuttingDown) {
+        // A shutdown is already in progress; ignore repeated close requests.
+        event.Veto();
+        return;
+    }
+    m_shuttingDown = true;
+
+    GetStatusBar()->SetStatusText(wxT("Shutting down…"));
+    Hide(); // Give the user an instant "closed" feel; the event loop keeps running.
+
+    // Run the blocking shutdown (thread joins + DHT teardown) OFF the GUI thread,
+    // then destroy the frame back on the GUI thread via CallAfter.
+    std::thread([this]() {
+        if (m_startupThread.joinable()) {
+            m_startupThread.join();
+        }
+        m_controller->stop();
+        CallAfter([this]() { Destroy(); });
+    }).detach();
+
+    event.Veto(); // We will Destroy() ourselves once shutdown completes.
 }
 
 void MainWindow::OnP2PMessageReceived(wxThreadEvent& event)

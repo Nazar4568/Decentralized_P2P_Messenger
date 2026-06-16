@@ -32,6 +32,9 @@ public:
     uint16_t localPort() const;
     bool isRunning() const;
 
+    /// Base64 local public key for the export feature (empty until ready).
+    std::string localPublicKeyBase64() const;
+
     std::vector<std::string> contacts() const;
 
 private:

@@ -2,6 +2,7 @@
 #include "../include/P2PNode.h"
 
 #include <algorithm>
+#include <cctype>
 
 AppController::AppController(std::shared_ptr<P2PNode> node)
     : m_node(std::move(node))
@@ -40,6 +41,8 @@ void AppController::start(const std::string& bootstrapHost, const std::string& b
 
     if (bootstrapPort != "0" && !bootstrapPort.empty()) {
         bootstrap(bootstrapHost, bootstrapPort);
+        // DHT may not be reachable on the first publish attempt; retry after bootstrap.
+        m_node->publishProfile(profile);
     }
 
     m_running = true;
@@ -62,7 +65,21 @@ void AppController::bootstrap(const std::string& host, const std::string& port)
 
 void AppController::sendMessage(const std::string& toPeerId, const std::string& text)
 {
-    m_node->sendMessage(toPeerId, text);
+    std::string recipient = toPeerId;
+    recipient.erase(recipient.begin(),
+                    std::find_if(recipient.begin(), recipient.end(),
+                                 [](unsigned char ch) { return !std::isspace(ch); }));
+    recipient.erase(
+        std::find_if(recipient.rbegin(), recipient.rend(),
+                     [](unsigned char ch) { return !std::isspace(ch); })
+            .base(),
+        recipient.end());
+
+    if (recipient.empty()) {
+        return;
+    }
+
+    m_node->sendMessage(recipient, text);
 }
 
 void AppController::addContact(const std::string& peerId)
@@ -97,6 +114,11 @@ uint16_t AppController::localPort() const
 bool AppController::isRunning() const
 {
     return m_running;
+}
+
+std::string AppController::localPublicKeyBase64() const
+{
+    return m_node->localPublicKeyBase64();
 }
 
 std::vector<std::string> AppController::contacts() const

@@ -13,6 +13,8 @@
 #include <mutex>
 #include <string>
 #include <thread>
+#include <unordered_map>
+#include <unordered_set>
 #include "../include/Types.h"
 class wxEvtHandler;
 
@@ -43,9 +45,18 @@ public:
     uint16_t localPort() const { return m_port; }
     bool isRunning() const { return m_running; }
 
+    /// Base64-encoded local public key. Empty until the node has finished
+    /// generating/loading its identity (safe to call from the GUI thread).
+    std::string localPublicKeyBase64() const;
+
 private:
     std::shared_ptr<CryptoService> m_crypto;
     KeyPair m_myKeys;
+
+    // Identity is created on the network worker thread but read from the GUI
+    // thread (export feature), so guard the cached base64 public key.
+    mutable std::mutex m_identityMutex;
+    std::string m_publicKeyB64;
     void notifyMessageReceived(const std::string& fromPeerId, const std::string& text);
     void notifyPeerFound(const std::string& peerId);
     void notifyNetworkStatus(const std::string& status);
@@ -57,6 +68,17 @@ private:
 
 #ifdef HAS_OPENDHT
     dht::DhtRunner m_dht;
+    mutable std::mutex m_peerKeysMutex;
+    std::unordered_map<std::string, std::vector<unsigned char>> m_peerPublicKeys;
+    mutable std::mutex m_deliveredMutex;
+    std::unordered_set<std::string> m_deliveredInboxKeys;
+
+    void cachePeerPublicKey(const std::string& userId, const std::vector<unsigned char>& publicKey);
+    bool tryGetCachedPeerPublicKey(const std::string& userId,
+                                   std::vector<unsigned char>& outPublicKey) const;
+    bool wasInboxMessageDelivered(const std::string& senderId, const std::string& messageId) const;
+    void markInboxMessageDelivered(const std::string& senderId, const std::string& messageId);
+    void deliverSecureInboxMessage(const std::string& senderId, const EncryptedPacket& packet);
 #else
     void mockWorkerLoop();
     std::unique_ptr<std::thread> m_mockThread;
