@@ -120,3 +120,27 @@ else()
         "  Install for real P2P: sudo apt install libopendht-dev  (Debian/Ubuntu)\n"
         "                        brew install opendht               (macOS)")
 endif()
+
+# ─────────────────────────────────────────
+# Sprint 3 Tests
+# Build: cmake --build . --target test_sprint3
+# Run:   ./test_sprint3
+# Requires only libsodium (no GTest / wxWidgets needed).
+# ─────────────────────────────────────────
+if(SODIUM_FOUND)
+    add_executable(test_sprint3
+        tests/test_sprint3.cpp
+        src/CryptoService.cpp
+    )
+    target_include_directories(test_sprint3 PRIVATE
+        ${CMAKE_CURRENT_SOURCE_DIR}/include
+        ${SODIUM_INCLUDE_DIRS}
+    )
+    target_link_libraries(test_sprint3 PRIVATE ${SODIUM_LIBRARY})
+    if(SODIUM_LIBRARY_DIRS)
+        target_link_directories(test_sprint3 PRIVATE ${SODIUM_LIBRARY_DIRS})
+    endif()
+
+    enable_testing()
+    add_test(NAME sprint3 COMMAND test_sprint3)
+endif()
