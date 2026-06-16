@@ -2,8 +2,12 @@
 #include "../include/P2PWxEvents.h"
 #include <filesystem>
 #include "../include/Types.h"
+#include <algorithm>
+#include <atomic>
+#include <cctype>
 #include <chrono>
 #include <iostream>
+#include <sstream>
 #include <wx/event.h>
 
 wxIMPLEMENT_DYNAMIC_CLASS(P2PMessageThreadEvent, wxThreadEvent);
@@ -16,6 +20,19 @@ wxDEFINE_EVENT(wxEVT_P2P_ERROR, wxThreadEvent);
 namespace {
 
 constexpr char kDhtFieldSep = '\x1F';
+
+/// OpenDHT stores strings msgpack-encoded; raw value->data is not the payload text.
+std::string UnpackDhtString(const std::shared_ptr<dht::Value>& value)
+{
+    if (!value) {
+        return {};
+    }
+    try {
+        return dht::Value::unpack<std::string>(*value);
+    } catch (const std::exception&) {
+        return std::string(value->data.begin(), value->data.end());
+    }
+}
 
 bool ParseDhtMessagePayload(const std::string& payload,
                             std::string& outSenderId,
@@ -32,7 +49,56 @@ bool ParseDhtMessagePayload(const std::string& payload,
 
     outSenderId = payload.substr(0, sep);
     outBody = payload.substr(sep + 1);
+
+    outSenderId.erase(outSenderId.begin(),
+                      std::find_if(outSenderId.begin(), outSenderId.end(),
+                                   [](unsigned char ch) { return !std::isspace(ch); }));
+    outSenderId.erase(
+        std::find_if(outSenderId.rbegin(), outSenderId.rend(),
+                     [](unsigned char ch) { return !std::isspace(ch); })
+            .base(),
+        outSenderId.end());
+
+    return !outSenderId.empty();
+}
+
+std::string BuildInboxDedupeKey(const std::string& senderId, const std::string& messageId)
+{
+    return senderId + kDhtFieldSep + messageId;
+}
+
+bool ParseSecureBody(const std::string& encryptedBody, EncryptedPacket& outPacket)
+{
+    std::vector<std::string> parts;
+    std::istringstream stream(encryptedBody);
+    std::string part;
+    while (std::getline(stream, part, '|')) {
+        parts.push_back(part);
+    }
+
+    if (parts.size() < 4) {
+        return false;
+    }
+
+    outPacket.messageId = parts[0];
+    outPacket.nonce = parts[1];
+    try {
+        outPacket.timestamp = std::stoll(parts[2]);
+    } catch (...) {
+        return false;
+    }
+
+    outPacket.ciphertext = parts[3];
+    for (std::size_t i = 4; i < parts.size(); ++i) {
+        outPacket.ciphertext += '|' + parts[i];
+    }
     return true;
+}
+
+bool IsBenignCryptoError(const std::string& message)
+{
+    return message.find("validation failed") != std::string::npos ||
+           message.find("REPLAY") != std::string::npos;
 }
 
 } // namespace
@@ -49,12 +115,26 @@ void P2PNode::setNodeConfig(uint16_t port, const std::string& id)
     m_port = port;
     if (!id.empty()) {
         m_myId = id;
+        m_myId.erase(m_myId.begin(),
+                     std::find_if(m_myId.begin(), m_myId.end(),
+                                  [](unsigned char ch) { return !std::isspace(ch); }));
+        m_myId.erase(
+            std::find_if(m_myId.rbegin(), m_myId.rend(),
+                         [](unsigned char ch) { return !std::isspace(ch); })
+                .base(),
+            m_myId.end());
     }
 }
 
 void P2PNode::bindUiTarget(wxEvtHandler* target)
 {
     m_uiTarget = target;
+}
+
+std::string P2PNode::localPublicKeyBase64() const
+{
+    std::lock_guard<std::mutex> lock(m_identityMutex);
+    return m_publicKeyB64;
 }
 
 void P2PNode::setMessageReceivedHandler(MessageReceivedHandler handler)
@@ -103,94 +183,53 @@ void P2PNode::startNode()
         }
     }
 
+    // Cache the base64 public key so the GUI export feature can read it safely.
+    {
+        std::lock_guard<std::mutex> lock(m_identityMutex);
+        m_publicKeyB64 = m_crypto->toBase64(m_myKeys.publicKey);
+    }
+
     const auto id = dht::crypto::generateIdentity();
     m_dht.run(m_port, id, true);
     m_running = true;
     notifyNetworkStatus("Running on port " + std::to_string(m_port) + " as " + m_myId);
 
     const dht::InfoHash listenKey = dht::InfoHash::get(m_myId + "_inbox");
-    std::cout << "[P2PNode] Слушаем ящик: " << m_myId << "_inbox\n";
+    std::cout << "[P2PNode] Listening on inbox: " << m_myId << "_inbox\n";
 
     // ETERNAL LISTENER: This lambda wakes up with every new message
     dht::ValueCallback onMessageReceived = [this](const std::vector<std::shared_ptr<dht::Value>>& values, bool expired) {
         if (expired) return true; // Ignoring old packets removed from the network
 
         for (const auto& value : values) {
-            const std::string payload(value->data.begin(), value->data.end());
+            const std::string payload = UnpackDhtString(value);
 
             // PARSE THE HEADLINE (Separate Alice from the encrypted body)
             std::string senderId;
             std::string encryptedBody;
-            if (!ParseDhtMessagePayload(payload, senderId, encryptedBody)) continue;
-            if (senderId.empty() || senderId == m_myId) continue; // Защита от эха
-
-            // 5.PARSE BODY: Split the string at '|' using a stringstream
-            std::vector<std::string> parts;
-            std::istringstream stream(encryptedBody);
-            std::string part;
-            while (std::getline(stream, part, '|')) {
-                parts.push_back(part);
+            if (!ParseDhtMessagePayload(payload, senderId, encryptedBody)) {
+                std::cerr << "[DHT] Dropping inbox value: unparseable payload\n";
+                continue;
+            }
+            if (senderId.empty() || senderId == m_myId) {
+                continue;
             }
 
-            if (parts.size() < 4) continue; // If there are less than 4 pieces, the packet is broken, ignore it
-
-            // We are putting together a structure to transfer to a security(Roman).
             EncryptedPacket packet;
             packet.version = 1;
             packet.senderId = senderId;
             packet.receiverId = m_myId;
-            packet.messageId = parts[0];
-            packet.nonce = parts[1];
-            try {
-                packet.timestamp = std::stoll(parts[2]);
-            } catch (...) {
-                continue; // Protection: If a hacker sends letters instead of a time, ignore it.
+            if (!ParseSecureBody(encryptedBody, packet)) {
+                std::cerr << "[DHT] Dropping inbox value from " << senderId
+                          << ": malformed secure body\n";
+                continue;
             }
-            packet.ciphertext = parts[3];
 
-            // 6. KEY REQUEST: We can't decrypt the packet without Alice's key!!
-            dht::InfoHash senderProfileKey = dht::InfoHash::get(senderId);
+            if (wasInboxMessageDelivered(senderId, packet.messageId)) {
+                continue;
+            }
 
-            // We create an internal "Time Capsule" for decryption
-            dht::GetCallback onSenderProfileFound = [this, senderId, packet](const std::vector<std::shared_ptr<dht::Value>>& profileValues) {
-                if (profileValues.empty()) return true;
-
-                // We get Alice's profile from the network
-                std::string profilePayload(profileValues.front()->data.begin(), profileValues.front()->data.end());
-
-                // As in sendPacket, we look for the last '|' to get the key
-                size_t lastPipe = profilePayload.find_last_of('|');
-                if (lastPipe == std::string::npos) return true;
-                std::string b64PubKey = profilePayload.substr(lastPipe + 1);
-
-                try {
-                    // Converting text to raw bytes
-                    std::vector<unsigned char> senderPubKey = m_crypto->fromBase64(b64PubKey);
-
-                    // decryption! myUserId is passed so decrypt() can verify receiverId
-                    std::string plainText = m_crypto->decrypt(
-                        packet,               // Packet
-                        m_myKeys.privateKey,  // Bob's private key
-                        senderPubKey,         // Alisa's pubkey
-                        m_myId               // our identity (receiver check)
-                    );
-
-                    std::cout << "[DHT] Secure from " << senderId << ": " << plainText << '\n';
-
-                    // Send the decrypted clear text to the interface (on the screen)!
-                    this->notifyMessageReceived(senderId, plainText);
-
-                } catch (const std::exception& e) {
-                    // Cryptographic failure (wrong key, tampered data, replay, validation error).
-                    std::cerr << "[Crypto] Decryption error from " << senderId
-                              << ": " << e.what() << "\n";
-                    this->notifyError(P2PErrorCode::DecryptionFailed, e.what());
-                }
-                return true;
-            };
-
-            // start searching for Alice's profile. When it's found, the lambda above will be triggered!
-            m_dht.get(senderProfileKey, onSenderProfileFound);
+            deliverSecureInboxMessage(senderId, packet);
         }
         return true;
     };
@@ -284,14 +323,18 @@ void P2PNode::publishProfile(const UserProfile& profile)
     std::cout << "[P2PNode] Publishing profile for " << profile.userId << "...\n";
     notifyNetworkStatus("Publishing profile for " + profile.userId);
 
-    m_dht.put(key, payload, [this](bool success) {
+    m_dht.put(key, payload, [this, profile](bool success) {
         if (success) {
             std::cout << "[DHT] Profile published.\n";
             notifyNetworkStatus("Profile published to DHT");
+            cachePeerPublicKey(profile.userId, m_myKeys.publicKey);
         } else {
-            std::cerr << "[DHT] Failed to publish profile.\n";
-            notifyNetworkStatus("Failed to publish profile");
-            notifyError(P2PErrorCode::NetworkUnavailable, "Failed to publish profile to DHT");
+            // Transient on startup: the DHT has no peers yet, so the first
+            // publish often "fails" before bootstrap completes. AppController
+            // re-publishes after bootstrap and the background loop refreshes it,
+            // so this is not a user-facing error — log and update status only.
+            std::cerr << "[DHT] Profile publish not yet confirmed (will retry).\n";
+            notifyNetworkStatus("Profile publish pending — retrying after bootstrap");
         }
     });
 #else
@@ -317,8 +360,20 @@ void P2PNode::findPeer(const std::string& userId)
             }
 
             for (const auto& value : values) {
-                const std::string payload(value->data.begin(), value->data.end());
+                const std::string payload = UnpackDhtString(value);
                 std::cout << "[DHT] Peer found (" << userId << "): " << payload << '\n';
+
+                const size_t lastPipe = payload.find_last_of('|');
+                if (lastPipe != std::string::npos) {
+                    try {
+                        const std::string b64PubKey = payload.substr(lastPipe + 1);
+                        cachePeerPublicKey(userId, m_crypto->fromBase64(b64PubKey));
+                    } catch (const std::exception& e) {
+                        std::cerr << "[DHT] Could not cache public key for " << userId
+                                  << ": " << e.what() << '\n';
+                    }
+                }
+
                 notifyPeerFound(userId);
             }
             notifyNetworkStatus("Peer found: " + userId);
@@ -336,48 +391,67 @@ void P2PNode::findPeer(const std::string& userId)
 void P2PNode::sendPacket(const std::string& receiverId, const EncryptedPacket& packet)
 {
 #ifdef HAS_OPENDHT
-    // We hash the recipient's name (for example, "bob")
-    dht::InfoHash profileKey = dht::InfoHash::get(receiverId);
+    const auto sendEncrypted = [this, receiverId, packet](
+                                   const std::vector<unsigned char>& receiverPublicKey) {
+        EncryptedPacket securePacket = m_crypto->encrypt(
+            packet.ciphertext,
+            receiverPublicKey,
+            m_myKeys.privateKey,
+            m_myId,
+            receiverId);
 
-    // Creating a "Time Capsule" (lambda). It will trigger when the network finds Bob's profile.
-    // We're CAPTURED the packet (message) into this capsule!
-    dht::GetCallback onProfileFound = [this, receiverId, packet](const std::vector<std::shared_ptr<dht::Value>>& values) {
-        if (values.empty()) return true; // Profile not found, cancel.
+        const std::string secureBody = securePacket.messageId + "|" +
+                                       securePacket.nonce + "|" +
+                                       std::to_string(securePacket.timestamp) + "|" +
+                                       securePacket.ciphertext;
 
-        // We take the profile string from the network. Format: Name|IP|Base64Key
-        std::string profilePayload(values.front()->data.begin(), values.front()->data.end());
+        const std::string fullPayload = m_myId + kDhtFieldSep + secureBody;
+        const dht::InfoHash inboxKey = dht::InfoHash::get(receiverId + "_inbox");
 
-        // looking for the last dash '|', everything after it is the key!
-        size_t lastPipe = profilePayload.find_last_of('|');
-        if (lastPipe == std::string::npos) return true;
-        std::string b64PubKey = profilePayload.substr(lastPipe + 1);
+        m_dht.put(inboxKey, fullPayload, [receiverId](bool success) {
+            if (success) {
+                std::cout << "[DHT] Encrypted message stored on " << receiverId
+                          << "_inbox\n";
+            } else {
+                std::cerr << "[DHT] Failed to store message on " << receiverId
+                          << "_inbox\n";
+            }
+        });
+    };
+
+    const dht::InfoHash profileKey = dht::InfoHash::get(receiverId);
+    const auto sentFlag = std::make_shared<std::atomic<bool>>(false);
+
+    dht::GetCallback onProfileFound = [this, receiverId, sendEncrypted, sentFlag](
+                                          const std::vector<std::shared_ptr<dht::Value>>& values) {
+        if (sentFlag->exchange(true)) {
+            return true;
+        }
+
+        if (values.empty()) {
+            std::cerr << "[DHT] Cannot send: recipient profile not found for "
+                      << receiverId << '\n';
+            notifyError(P2PErrorCode::PeerNotFound,
+                        "Recipient profile not found on DHT: " + receiverId);
+            return true;
+        }
+
+        const std::string profilePayload = UnpackDhtString(values.front());
+        const size_t lastPipe = profilePayload.find_last_of('|');
+        if (lastPipe == std::string::npos) {
+            notifyError(P2PErrorCode::PeerNotFound,
+                        "Recipient profile on DHT is malformed: " + receiverId);
+            return true;
+        }
 
         try {
-            // ENCRYPTION! Converting the key text into bytes and encrypt the message.
-            std::vector<unsigned char> bobPubKey = m_crypto->fromBase64(b64PubKey);
-
-            EncryptedPacket securePacket = m_crypto->encrypt(
-                packet.ciphertext,    // Clean text
-                bobPubKey,            // Bob's public key
-                m_myKeys.privateKey,  // private key
-                m_myId,               //from
-                receiverId            // to
-            );
-
-            std::string secureBody = securePacket.messageId + "|" +
-                                     securePacket.nonce + "|" +
-                                     std::to_string(securePacket.timestamp) + "|" +
-                                     securePacket.ciphertext;
-
-            std::string fullPayload = m_myId + kDhtFieldSep + secureBody;
-
-            dht::InfoHash inboxKey = dht::InfoHash::get(receiverId + "_inbox");
-            m_dht.put(inboxKey, fullPayload, [receiverId](bool success) {
-                if (success) std::cout << "[DHT] The encrypted package has been delivered!\n";
-            });
-
+            const std::string b64PubKey = profilePayload.substr(lastPipe + 1);
+            const std::vector<unsigned char> receiverPublicKey = m_crypto->fromBase64(b64PubKey);
+            cachePeerPublicKey(receiverId, receiverPublicKey);
+            sendEncrypted(receiverPublicKey);
         } catch (const std::exception& e) {
-            std::cerr << "[Crypto] Encryption error: " << e.what() << "\n";
+            std::cerr << "[Crypto] Encryption error: " << e.what() << '\n';
+            notifyError(P2PErrorCode::DeliveryFailed, e.what());
         }
         return true;
     };
@@ -401,6 +475,108 @@ void P2PNode::mockWorkerLoop()
         notifyMessageReceived("mock-peer-bob",
                               "Periodic mock message #" + std::to_string(tick));
     }
+}
+#endif
+
+#ifdef HAS_OPENDHT
+void P2PNode::cachePeerPublicKey(const std::string& userId,
+                                 const std::vector<unsigned char>& publicKey)
+{
+    if (userId.empty() || publicKey.empty()) {
+        return;
+    }
+    std::lock_guard<std::mutex> lock(m_peerKeysMutex);
+    m_peerPublicKeys[userId] = publicKey;
+}
+
+bool P2PNode::tryGetCachedPeerPublicKey(const std::string& userId,
+                                        std::vector<unsigned char>& outPublicKey) const
+{
+    std::lock_guard<std::mutex> lock(m_peerKeysMutex);
+    const auto it = m_peerPublicKeys.find(userId);
+    if (it == m_peerPublicKeys.end()) {
+        return false;
+    }
+    outPublicKey = it->second;
+    return true;
+}
+
+bool P2PNode::wasInboxMessageDelivered(const std::string& senderId,
+                                       const std::string& messageId) const
+{
+    std::lock_guard<std::mutex> lock(m_deliveredMutex);
+    return m_deliveredInboxKeys.count(BuildInboxDedupeKey(senderId, messageId)) > 0;
+}
+
+void P2PNode::markInboxMessageDelivered(const std::string& senderId,
+                                       const std::string& messageId)
+{
+    std::lock_guard<std::mutex> lock(m_deliveredMutex);
+    m_deliveredInboxKeys.insert(BuildInboxDedupeKey(senderId, messageId));
+}
+
+void P2PNode::deliverSecureInboxMessage(const std::string& senderId,
+                                        const EncryptedPacket& packet)
+{
+    const auto decryptWithSenderKey =
+        [this, senderId, packet](const std::vector<unsigned char>& senderPublicKey) {
+            EncryptedPacket inbound = packet;
+            inbound.senderId = senderId;
+            inbound.receiverId = m_myId;
+
+            const std::string plainText = m_crypto->decrypt(
+                inbound,
+                m_myKeys.privateKey,
+                senderPublicKey,
+                m_myId);
+
+            markInboxMessageDelivered(senderId, packet.messageId);
+            std::cout << "[DHT] Secure from " << senderId << ": " << plainText << '\n';
+            notifyMessageReceived(senderId, plainText);
+        };
+
+    const dht::InfoHash senderProfileKey = dht::InfoHash::get(senderId);
+    const auto processedFlag = std::make_shared<std::atomic<bool>>(false);
+
+    dht::GetCallback onSenderProfileFound =
+        [this, senderId, packet, decryptWithSenderKey, processedFlag](
+            const std::vector<std::shared_ptr<dht::Value>>& profileValues) {
+            if (processedFlag->exchange(true)) {
+                return true;
+            }
+
+            if (profileValues.empty()) {
+                std::cerr << "[DHT] Cannot decrypt: sender profile not found for "
+                          << senderId << '\n';
+                notifyError(P2PErrorCode::PeerNotFound,
+                            "Sender profile not found on DHT: " + senderId);
+                return true;
+            }
+
+            const std::string profilePayload = UnpackDhtString(profileValues.front());
+            const size_t lastPipe = profilePayload.find_last_of('|');
+            if (lastPipe == std::string::npos) {
+                return true;
+            }
+
+            try {
+                const std::string b64PubKey = profilePayload.substr(lastPipe + 1);
+                const std::vector<unsigned char> senderPublicKey =
+                    m_crypto->fromBase64(b64PubKey);
+                cachePeerPublicKey(senderId, senderPublicKey);
+                decryptWithSenderKey(senderPublicKey);
+            } catch (const std::exception& e) {
+                const std::string error = e.what();
+                std::cerr << "[Crypto] Decryption error from " << senderId << ": "
+                          << error << '\n';
+                if (!IsBenignCryptoError(error)) {
+                    notifyError(P2PErrorCode::DecryptionFailed, error);
+                }
+            }
+            return true;
+        };
+
+    m_dht.get(senderProfileKey, onSenderProfileFound);
 }
 #endif
 

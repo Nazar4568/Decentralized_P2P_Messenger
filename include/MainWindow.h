@@ -4,6 +4,7 @@
 
 #include <memory>
 #include <string>
+#include <thread>
 
 #include <wx/button.h>
 #include <wx/frame.h>
@@ -30,6 +31,7 @@ private:
     enum class ChatMessageKind { Incoming, Outgoing, System };
 
     void BuildUi();
+    void BuildMenuBar();
     void WireP2PEvents();
 
     void OnSendClicked(wxCommandEvent& event);
@@ -37,6 +39,9 @@ private:
     void OnBootstrapClicked(wxCommandEvent& event);
     void OnContactSelected(wxCommandEvent& event);
     void OnMessageKeyDown(wxKeyEvent& event);
+    void OnExportIdentity(wxCommandEvent& event);
+    void OnShowAbout(wxCommandEvent& event);
+    void OnExit(wxCommandEvent& event);
     void OnClose(wxCloseEvent& event);
 
     void OnP2PMessageReceived(wxThreadEvent& event);
@@ -60,6 +65,11 @@ private:
     std::string m_bootstrapPort;
     std::string m_activeContactId;
 
+    // Network start() (key generation + DHT init) runs here so the GUI thread
+    // never blocks. Joined during the asynchronous shutdown sequence.
+    std::thread m_startupThread;
+    bool m_shuttingDown{false};
+
     wxStaticText* m_statusText{nullptr};
     wxSplitterWindow* m_splitter{nullptr};
     wxListBox* m_contactsList{nullptr};
@@ -71,4 +81,5 @@ private:
     wxButton* m_addContactButton{nullptr};
     wxButton* m_bootstrapButton{nullptr};
     wxButton* m_sendButton{nullptr};
+    wxButton* m_identityButton{nullptr};
 };
