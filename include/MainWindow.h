@@ -2,9 +2,12 @@
 
 #include "AppController.h"
 
+#include <functional>
+#include <map>
 #include <memory>
 #include <string>
 #include <thread>
+#include <vector>
 
 #include <wx/button.h>
 #include <wx/frame.h>
@@ -25,10 +28,21 @@ public:
     MainWindow(std::shared_ptr<AppController> controller,
                const std::string& peerId,
                uint16_t port,
+               const std::string& bootstrapHost,
                const std::string& bootstrapPort);
 
 private:
     enum class ChatMessageKind { Incoming, Outgoing, System };
+
+    // One stored chat line. We keep per-contact history in memory so switching
+    // between conversations (and back) re-renders the full thread instead of
+    // wiping it.
+    struct ChatEntry {
+        ChatMessageKind kind;
+        wxString peer;
+        wxString text;
+        wxString timestamp;
+    };
 
     void BuildUi();
     void BuildMenuBar();
@@ -40,6 +54,7 @@ private:
     void OnContactSelected(wxCommandEvent& event);
     void OnMessageKeyDown(wxKeyEvent& event);
     void OnExportIdentity(wxCommandEvent& event);
+    void OnChangePeerId(wxCommandEvent& event);
     void OnShowAbout(wxCommandEvent& event);
     void OnExit(wxCommandEvent& event);
     void OnClose(wxCloseEvent& event);
@@ -58,16 +73,29 @@ private:
     void AddContactToList(const wxString& peerId);
     void UpdateNetworkStatus(const wxString& status);
     void ShowError(const wxString& code, const wxString& message);
-    void loadChatHistory(const std::string& contactId);
+
+    // Per-contact history management.
+    void RecordMessage(const std::string& contactId, ChatMessageKind kind,
+                       const wxString& peer, const wxString& text);
+    void RenderHistory(const std::string& contactId);
+    void SwitchActiveContact(const std::string& contactId);
+
+    // Runs a blocking network task (start / restart) off the GUI thread.
+    void RunNetworkTaskAsync(std::function<void()> task);
+
     wxString CurrentTimestamp() const;
 
     std::shared_ptr<AppController> m_controller;
+    std::string m_bootstrapHost;
     std::string m_bootstrapPort;
     std::string m_activeContactId;
 
-    // Network start() (key generation + DHT init) runs here so the GUI thread
-    // never blocks. Joined during the asynchronous shutdown sequence.
-    std::thread m_startupThread;
+    // In-memory chat history keyed by contact (peer) ID.
+    std::map<std::string, std::vector<ChatEntry>> m_history;
+
+    // Network start()/restart (key generation + DHT init) runs here so the GUI
+    // thread never blocks. Joined during the asynchronous shutdown sequence.
+    std::thread m_networkThread;
     bool m_shuttingDown{false};
 
     wxStaticText* m_statusText{nullptr};
@@ -77,6 +105,7 @@ private:
     wxTextCtrl* m_addContactInput{nullptr};
     wxTextCtrl* m_peerIdInput{nullptr};
     wxTextCtrl* m_messageInput{nullptr};
+    wxTextCtrl* m_bootstrapHostInput{nullptr};
     wxTextCtrl* m_bootstrapPortInput{nullptr};
     wxButton* m_addContactButton{nullptr};
     wxButton* m_bootstrapButton{nullptr};

@@ -41,12 +41,14 @@ public:
     {
         const std::string peerId = EnvOrDefault("P2P_PEER_ID", "user1");
         const uint16_t port = ParsePort(EnvOrDefault("P2P_PORT", "4222"), 4222);
+        const std::string bootstrapHost = EnvOrDefault("P2P_BOOTSTRAP_HOST", "127.0.0.1");
         const std::string bootstrapPort = EnvOrDefault("P2P_BOOTSTRAP_PORT", "0");
 
         auto node = std::make_shared<P2PNode>();
         auto controller = std::make_shared<AppController>(node);
 
-        auto* mainWindow = new MainWindow(controller, peerId, port, bootstrapPort);
+        auto* mainWindow = new MainWindow(controller, peerId, port,
+                                          bootstrapHost, bootstrapPort);
         SetTopWindow(mainWindow);
         mainWindow->Show(true);
         return true;

@@ -24,12 +24,20 @@ public:
                const std::string& bootstrapPort = "0");
     void stop();
 
+    void setBootstrapHost(const std::string& host);
     void bootstrap(const std::string& host, const std::string& port);
     void sendMessage(const std::string& toPeerId, const std::string& text);
     void addContact(const std::string& peerId);
 
+    /// Restart the node under a new Peer ID (new identity + inbox + profile).
+    /// Blocking (stops then starts the DHT); call from a worker thread.
+    void changePeerId(const std::string& newPeerId,
+                      const std::string& bootstrapHost,
+                      const std::string& bootstrapPort);
+
     std::string localPeerId() const;
     uint16_t localPort() const;
+    std::string bootstrapHost() const;
     bool isRunning() const;
 
     /// Base64 local public key for the export feature (empty until ready).
