@@ -297,8 +297,18 @@ void P2PNode::sendMessage(const std::string& toPeerId, const std::string& text)
 #endif
 }
 
+void P2PNode::setBootstrapHost(const std::string& host)
+{
+    if (!host.empty()) {
+        m_bootstrapHost = host;
+    }
+}
+
 void P2PNode::bootstrap(const std::string& ip, const std::string& port)
 {
+    if (!ip.empty()) {
+        m_bootstrapHost = ip;
+    }
 #ifdef HAS_OPENDHT
     std::cout << "[P2PNode] Bootstrapping to " << ip << ':' << port << "...\n";
     notifyNetworkStatus("Bootstrapping to " + ip + ":" + port);
@@ -680,7 +690,7 @@ void P2PNode::backgroundPublishLoop()
         secondsPassed++;
 
         // wait 10 min
-        if (secondsPassed >= 600) {
+        if (secondsPassed >= 5) {
             secondsPassed = 0; //Reset the stopwatch
 
             // If the profile has already been created by the user, we publish it again!

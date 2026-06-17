@@ -36,6 +36,7 @@ public:
     void setPeerFoundHandler(PeerFoundHandler handler) override;
 
     void setNodeConfig(uint16_t port, const std::string& id);
+    void setBootstrapHost(const std::string& host);
     void bootstrap(const std::string& ip, const std::string& port);
     void publishProfile(const UserProfile& profile);
     void findPeer(const std::string& userId);
@@ -43,6 +44,7 @@ public:
 
     std::string localPeerId() const { return m_myId; }
     uint16_t localPort() const { return m_port; }
+    std::string bootstrapHost() const { return m_bootstrapHost; }
     bool isRunning() const { return m_running; }
 
     /// Base64-encoded local public key. Empty until the node has finished
@@ -92,6 +94,9 @@ private:
 
     uint16_t m_port{4222};
     std::string m_myId{"default_node"};
+    // Host used to reach the DHT bootstrap node. Default is loopback for
+    // single-machine testing; updated when bootstrap() is called with a host.
+    std::string m_bootstrapHost{"127.0.0.1"};
 
     //MADE ATOMIC: Threads can now safely read and change this flag
     std::atomic<bool> m_running{false};

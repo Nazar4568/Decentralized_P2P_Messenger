@@ -4,7 +4,9 @@
 #include "../include/P2PWxEvents.h"
 
 #include <wx/menu.h>
+#include <wx/msgdlg.h>
 #include <wx/sizer.h>
+#include <wx/textdlg.h>
 
 #include <thread>
 #include <utility>
@@ -26,6 +28,7 @@ const wxColour kTimestampFg(130, 130, 130);
 
 enum {
     ID_EXPORT_IDENTITY = wxID_HIGHEST + 100,
+    ID_CHANGE_PEER_ID,
 };
 
 } // namespace
@@ -33,10 +36,12 @@ enum {
 MainWindow::MainWindow(std::shared_ptr<AppController> controller,
                        const std::string& peerId,
                        uint16_t port,
+                       const std::string& bootstrapHost,
                        const std::string& bootstrapPort)
-    : wxFrame(nullptr, wxID_ANY, wxT("Decentralized P2P Messenger — Sprint 4"),
+    : wxFrame(nullptr, wxID_ANY, wxT("Decentralized P2P Messenger"),
               wxDefaultPosition, wxSize(960, 640))
     , m_controller(std::move(controller))
+    , m_bootstrapHost(bootstrapHost)
     , m_bootstrapPort(bootstrapPort)
 {
     CreateStatusBar(1);
@@ -48,6 +53,9 @@ MainWindow::MainWindow(std::shared_ptr<AppController> controller,
 
     m_controller->bindUiTarget(this);
     m_controller->configure(peerId, port);
+    // Seed the bootstrap host (from P2P_BOOTSTRAP_HOST) so the initial start and
+    // any later restart dial the right peer instead of defaulting to loopback.
+    m_controller->setBootstrapHost(m_bootstrapHost);
 
     UpdateNetworkStatus(wxString::Format(
         wxT("Peer: %s | Port: %u | Status: Starting..."),
@@ -58,11 +66,21 @@ MainWindow::MainWindow(std::shared_ptr<AppController> controller,
     // bring-up are slow and would otherwise freeze the window on launch.
     // All status/peer/message updates flow back via wxQueueEvent (thread-safe).
     auto controllerRef = m_controller;
-    const std::string bootstrapHost = "127.0.0.1";
+    const std::string bootstrapHostValue = m_controller->bootstrapHost();
     const std::string bootstrapPortValue = m_bootstrapPort;
-    m_startupThread = std::thread([controllerRef, bootstrapHost, bootstrapPortValue]() {
-        controllerRef->start(bootstrapHost, bootstrapPortValue);
+    RunNetworkTaskAsync([controllerRef, bootstrapHostValue, bootstrapPortValue]() {
+        controllerRef->start(bootstrapHostValue, bootstrapPortValue);
     });
+}
+
+void MainWindow::RunNetworkTaskAsync(std::function<void()> task)
+{
+    // Ensure the previous network task's thread object is joined before reuse
+    // (initial start has normally finished long before a restart is requested).
+    if (m_networkThread.joinable()) {
+        m_networkThread.join();
+    }
+    m_networkThread = std::thread(std::move(task));
 }
 
 void MainWindow::BuildMenuBar()
@@ -70,6 +88,8 @@ void MainWindow::BuildMenuBar()
     auto* menuBar = new wxMenuBar();
 
     auto* fileMenu = new wxMenu();
+    fileMenu->Append(ID_CHANGE_PEER_ID, wxT("&Change Peer ID…\tCtrl+I"),
+                     wxT("Restart the node under a new Peer ID / identity"));
     fileMenu->Append(ID_EXPORT_IDENTITY, wxT("&Export Identity…\tCtrl+E"),
                      wxT("Copy or save your User ID and public key"));
     fileMenu->AppendSeparator();
@@ -93,6 +113,13 @@ void MainWindow::BuildUi()
     rootSizer->Add(m_statusText, 0, wxEXPAND | wxALL, 8);
 
     auto* bootstrapRow = new wxBoxSizer(wxHORIZONTAL);
+    bootstrapRow->Add(new wxStaticText(this, wxID_ANY, wxT("Bootstrap host:")),
+                      0, wxALIGN_CENTER_VERTICAL | wxRIGHT, 6);
+    m_bootstrapHostInput = new wxTextCtrl(this, wxID_ANY,
+                                          wxString::FromUTF8(m_bootstrapHost.c_str(),
+                                                             static_cast<int>(m_bootstrapHost.size())));
+    m_bootstrapHostInput->SetMinSize(wxSize(140, -1));
+    bootstrapRow->Add(m_bootstrapHostInput, 0, wxALIGN_CENTER_VERTICAL | wxRIGHT, 8);
     bootstrapRow->Add(new wxStaticText(this, wxID_ANY, wxT("Bootstrap port:")),
                       0, wxALIGN_CENTER_VERTICAL | wxRIGHT, 6);
     m_bootstrapPortInput = new wxTextCtrl(this, wxID_ANY,
@@ -183,6 +210,7 @@ void MainWindow::WireP2PEvents()
     m_contactsList->Bind(wxEVT_LISTBOX, &MainWindow::OnContactSelected, this);
     m_identityButton->Bind(wxEVT_BUTTON, &MainWindow::OnExportIdentity, this);
 
+    Bind(wxEVT_MENU, &MainWindow::OnChangePeerId, this, ID_CHANGE_PEER_ID);
     Bind(wxEVT_MENU, &MainWindow::OnExportIdentity, this, ID_EXPORT_IDENTITY);
     Bind(wxEVT_MENU, &MainWindow::OnShowAbout, this, wxID_ABOUT);
     Bind(wxEVT_MENU, &MainWindow::OnExit, this, wxID_EXIT);
@@ -259,7 +287,7 @@ void MainWindow::AppendSystemLine(const wxString& text)
 
 void MainWindow::SendCurrentMessage()
 {
-    const wxString peerId = m_peerIdInput->GetValue().Trim();
+    wxString peerId = m_peerIdInput->GetValue().Trim(true).Trim(false);
     const wxString text = m_messageInput->GetValue();
 
     if (peerId.IsEmpty() || text.IsEmpty()) {
@@ -268,9 +296,15 @@ void MainWindow::SendCurrentMessage()
         return;
     }
 
-    m_controller->sendMessage(std::string(peerId.utf8_str()), std::string(text.utf8_str()));
+    const std::string recipient = std::string(peerId.utf8_str());
+    m_controller->sendMessage(recipient, std::string(text.utf8_str()));
 
-    AppendChatMessage(ChatMessageKind::Outgoing, peerId, text);
+    AddContactToList(peerId);
+    // Make the recipient the active conversation (re-renders prior history),
+    // then append the outgoing line into that thread's history.
+    SwitchActiveContact(recipient);
+    RecordMessage(recipient, ChatMessageKind::Outgoing, peerId, text);
+
     m_messageInput->Clear();
     GetStatusBar()->SetStatusText(wxT("Message sent to ") + peerId);
 }
@@ -311,14 +345,18 @@ void MainWindow::OnAddContactClicked(wxCommandEvent& /*event*/)
 
 void MainWindow::OnBootstrapClicked(wxCommandEvent& /*event*/)
 {
+    wxString host = m_bootstrapHostInput->GetValue().Trim(true).Trim(false);
     const wxString port = m_bootstrapPortInput->GetValue().Trim();
+    if (host.IsEmpty()) {
+        host = wxT("127.0.0.1");
+    }
     if (port.IsEmpty() || port == wxT("0")) {
         AppendSystemLine(wxT("[system] Enter a bootstrap port (not 0)."));
         return;
     }
 
-    m_controller->bootstrap("127.0.0.1", std::string(port.utf8_str()));
-    AppendSystemLine(wxT("[system] Bootstrapping to 127.0.0.1:") + port);
+    m_controller->bootstrap(std::string(host.utf8_str()), std::string(port.utf8_str()));
+    AppendSystemLine(wxT("[system] Bootstrapping to ") + host + wxT(":") + port);
 }
 
 void MainWindow::OnContactSelected(wxCommandEvent& /*event*/)
@@ -331,25 +369,51 @@ void MainWindow::OnContactSelected(wxCommandEvent& /*event*/)
     const wxString contactId = m_contactsList->GetString(selection);
     m_peerIdInput->SetValue(contactId);
 
-    const std::string newContactId = std::string(contactId.utf8_str());
-    if (newContactId == m_activeContactId) {
-        // Re-selecting the active contact must not wipe the visible conversation.
+    // SwitchActiveContact re-renders the stored thread and ignores re-selecting
+    // the already-active contact, so the visible conversation is never wiped.
+    SwitchActiveContact(std::string(contactId.utf8_str()));
+}
+
+void MainWindow::RecordMessage(const std::string& contactId, ChatMessageKind kind,
+                               const wxString& peer, const wxString& text)
+{
+    if (contactId.empty()) {
         return;
     }
 
-    m_activeContactId = newContactId;
-    loadChatHistory(m_activeContactId);
+    ChatEntry entry{kind, peer, text, CurrentTimestamp()};
+    m_history[contactId].push_back(entry);
+
+    // Only paint it now if this contact's thread is the one on screen; otherwise
+    // it stays in history and appears when the user switches to that contact.
+    if (contactId == m_activeContactId) {
+        AppendChatMessage(entry.kind, entry.peer, entry.text, entry.timestamp);
+    }
 }
 
-void MainWindow::loadChatHistory(const std::string& contactId)
+void MainWindow::RenderHistory(const std::string& contactId)
 {
-    // Persistent history is not wired yet; start each conversation with a clean,
-    // honest header instead of placeholder/mock messages.
     m_chatLog->Clear();
     AppendSystemLine(wxString::Format(
         wxT("[system] Conversation with %s"),
         wxString::FromUTF8(contactId.c_str(), static_cast<int>(contactId.size()))));
     AppendSystemLine(wxT("[system] Messages are end-to-end encrypted."));
+
+    const auto it = m_history.find(contactId);
+    if (it != m_history.end()) {
+        for (const auto& entry : it->second) {
+            AppendChatMessage(entry.kind, entry.peer, entry.text, entry.timestamp);
+        }
+    }
+}
+
+void MainWindow::SwitchActiveContact(const std::string& contactId)
+{
+    if (contactId.empty() || contactId == m_activeContactId) {
+        return;
+    }
+    m_activeContactId = contactId;
+    RenderHistory(contactId);
 }
 
 void MainWindow::OnExportIdentity(wxCommandEvent& /*event*/)
@@ -362,6 +426,54 @@ void MainWindow::OnExportIdentity(wxCommandEvent& /*event*/)
         wxString::FromUTF8(userId.c_str(), static_cast<int>(userId.size())),
         wxString::FromUTF8(publicKey.c_str(), static_cast<int>(publicKey.size())));
     dialog.ShowModal();
+}
+
+void MainWindow::OnChangePeerId(wxCommandEvent& /*event*/)
+{
+    if (m_shuttingDown) {
+        return;
+    }
+
+    const std::string currentIdStd = m_controller->localPeerId();
+    const wxString currentId = wxString::FromUTF8(currentIdStd.c_str(),
+                                                  static_cast<int>(currentIdStd.size()));
+
+    wxTextEntryDialog dialog(this,
+                             wxT("Enter a new Peer ID.\n\n"
+                                 "This restarts networking and generates a new identity\n"
+                                 "(new keys, inbox and published profile)."),
+                             wxT("Change Peer ID"),
+                             currentId);
+    if (dialog.ShowModal() != wxID_OK) {
+        return;
+    }
+
+    wxString newId = dialog.GetValue().Trim(true).Trim(false);
+    if (newId.IsEmpty()) {
+        wxMessageBox(wxT("Peer ID cannot be empty."), wxT("Change Peer ID"),
+                     wxOK | wxICON_WARNING, this);
+        return;
+    }
+    if (newId == currentId) {
+        return; // No change requested.
+    }
+
+    const std::string newIdStd = std::string(newId.utf8_str());
+
+    // Reset the on-screen conversation: the local identity is changing, so the
+    // active thread no longer reflects who "you" are. Stored per-contact history
+    // is kept (those are remote peers and remain valid).
+    m_activeContactId.clear();
+    m_chatLog->Clear();
+    AppendSystemLine(wxT("[system] Restarting network as ") + newId + wxT(" …"));
+    GetStatusBar()->SetStatusText(wxT("Changing Peer ID to ") + newId + wxT("…"));
+
+    auto controllerRef = m_controller;
+    const std::string bootstrapHost = m_controller->bootstrapHost();
+    const std::string bootstrapPortValue = m_bootstrapPort;
+    RunNetworkTaskAsync([controllerRef, newIdStd, bootstrapHost, bootstrapPortValue]() {
+        controllerRef->changePeerId(newIdStd, bootstrapHost, bootstrapPortValue);
+    });
 }
 
 void MainWindow::OnShowAbout(wxCommandEvent& /*event*/)
@@ -390,8 +502,8 @@ void MainWindow::OnClose(wxCloseEvent& event)
     // Run the blocking shutdown (thread joins + DHT teardown) OFF the GUI thread,
     // then destroy the frame back on the GUI thread via CallAfter.
     std::thread([this]() {
-        if (m_startupThread.joinable()) {
-            m_startupThread.join();
+        if (m_networkThread.joinable()) {
+            m_networkThread.join();
         }
         m_controller->stop();
         CallAfter([this]() { Destroy(); });
@@ -417,7 +529,21 @@ void MainWindow::OnP2PMessageReceived(wxThreadEvent& event)
     }
 
     AddContactToList(sender);
-    AppendChatMessage(ChatMessageKind::Incoming, sender, text);
+
+    const std::string senderStd = std::string(sender.utf8_str());
+
+    // If no conversation is open yet, surface the sender's thread automatically.
+    if (m_activeContactId.empty()) {
+        SwitchActiveContact(senderStd);
+    }
+
+    // Store under the sender; RecordMessage paints it only if that thread is
+    // currently on screen (otherwise it waits in history).
+    RecordMessage(senderStd, ChatMessageKind::Incoming, sender, text);
+
+    if (m_activeContactId != senderStd) {
+        GetStatusBar()->SetStatusText(wxT("New message from ") + sender);
+    }
 }
 
 void MainWindow::OnP2PPeerFound(wxThreadEvent& event)
